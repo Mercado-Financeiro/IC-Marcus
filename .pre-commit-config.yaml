@@ -1,0 +1,36 @@
+repos:
+  - repo: https://github.com/psf/black
+    rev: 24.4.2
+    hooks:
+      - id: black
+        files: ^(core/|tests/).*\.py$
+        args: [--line-length=88]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.6
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+        files: ^(core/|tests/).*\.py$
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-yaml
+        files: ^\.github/workflows/.*\.yml$
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=5000]
+
+  # Local test hook - runs quick tests before commit
+  - repo: local
+    hooks:
+      - id: pytest-check
+        name: Run quick tests
+        entry: bash -c 'python -m pytest tests/unit/core/config/ -x -q --tb=short --ignore=tests/unit/core/ml/models/test_lstm_model.py || (echo "Tests failed! Fix before committing." && exit 1)'
+        language: system
+        pass_filenames: false
+        always_run: false
+        stages: [commit]

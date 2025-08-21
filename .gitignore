@@ -1,0 +1,151 @@
+_site/
+core/data/memmap/**
+src/core/
+core/
+
+# ===== PYTHON =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ===== VIRTUAL ENVIRONMENTS =====
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# ===== JUPYTER NOTEBOOKS =====
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+notebooks/*backup*.ipynb
+
+# ===== DADOS GRANDES (não versionar) =====
+data/*.parquet
+data/*.csv
+data/*.json
+data/*.pickle
+data/*.pkl
+src/data/raw/*.parquet
+src/data/features/*.parquet
+src/data/**/*.csv
+src/data/**/*.json
+src/data/**/*.pkl
+
+# Modelos treinados
+models/*.h5
+models/*.keras
+models/*.joblib
+models/*.pkl
+models/*.model
+models/**/*.h5
+models/**/*.keras
+models/**/*.joblib
+models/**/*.weights
+src/artifacts/models/**
+
+# Scalers e preprocessors
+scalers/*.pkl
+scalers/*.joblib
+scalers/*.gz
+scalers/**/*.pkl
+scalers/**/*.gz
+src/artifacts/scalers/**
+
+# ===== RESULTADOS E LOGS =====
+results/
+logs/
+*.log
+training_logs/
+lstm_training.log
+src/ic_core/logs/**
+reports/*.html
+reports/*.json
+
+# ===== CACHE E TUNING =====
+lstm_tuning/
+optuna_study.db
+.optuna/
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ===== SISTEMA OPERACIONAL =====
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ===== EDITORES =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===== TEMPORÁRIOS =====
+*.tmp
+*.temp
+*.bak
+*.backup
+temp_*
+tmp_*
+
+# ===== DOCKER =====
+.dockerignore
+docker-compose.override.yml
+
+# ===== ESPECÍFICOS DO PROJETO =====
+# Arquivos de exemplo/teste temporários
+test_pipeline_fixes.py
+run_clean_pipeline.py
+run_enhanced_pipeline.py
+temp_pipeline_*.py
+
+# Backups
+*.backup_*
+notebooks/IC_Crypto_Complete_backup_*.ipynb
+
+# Relatórios gerados
+performance_report_*.json
+pipeline_metrics_*.json
+pipeline_metrics_*.csv
+# Limpeza automática
+*.pyc
+*.pyo
+*.old
+.pytest_cache/
+logs/*.log
+reports/training_report_*.html
+reports/training_report_*.json
+src/ic_core/artifacts/**
+
+# ===== COMPAT DE TESTES (SYMLINKS LOCAIS) =====
+tests/unit/core/pipeline/feature_engineering/01_feature_engineering.py
+tests/unit/core/scripts/01_feature_engineering.py
