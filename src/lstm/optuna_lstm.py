@@ -46,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--symbol", type=str, default="BTCUSDT")
     p.add_argument("--rule", type=str, default="1min")
     p.add_argument("--horizon", type=int, default=5)
+    p.add_argument("--horizons", type=int, nargs="*", default=[1, 5, 15, 60])
 
     p.add_argument("--train", type=str, nargs=2, default=["2018-01-01", "2025-07-31"])
     p.add_argument("--val", type=str, nargs=2, default=["2025-08-01", "2025-08-15"])
@@ -65,17 +66,11 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def build_data(csv_path: str, rule: str, horizon: int, train: Tuple[str, str], val: Tuple[str, str], test: Tuple[str, str]):
+def build_base_df(csv_path: str, rule: str) -> pd.DataFrame:
     df = load_ohlcv_csv(csv_path)
     df = resample_ohlcv(df, rule)
     df = add_base_features(df)
-    y = make_horizon_target(df, horizon)
-    features = ["open", "high", "low", "close", "volume", "ret_1", "vol_realizada_30"]
-    X = df[features].copy()
-    mask = y.notna()
-    X = X.loc[mask]
-    y = y.loc[mask]
-    return X, y
+    return df
 
 
 def make_pruner(kind: str):
@@ -85,12 +80,12 @@ def make_pruner(kind: str):
 
 
 def objective_factory(
-    X_all: pd.DataFrame,
-    y_all: pd.Series,
+    df_base: pd.DataFrame,
     args: argparse.Namespace,
 ):
     def objective(trial: optuna.Trial) -> float:
         # Espaço de busca
+        horizon = trial.suggest_categorical("horizon", args.horizons)
         lookback = trial.suggest_int("lookback", 32, 256, step=16)
         hidden_size = trial.suggest_int("hidden_size", 64, 256, step=32)
         num_layers = trial.suggest_int("num_layers", 1, 3)
@@ -98,6 +93,14 @@ def objective_factory(
         lr = trial.suggest_float("lr", 1e-4, 3e-3, log=True)
         batch_size = trial.suggest_int("batch_size", 64, 512, step=64)
         bidirectional = trial.suggest_categorical("bidirectional", [False, True])
+
+        # Constrói X,y para o horizonte escolhido
+        features = ["open", "high", "low", "close", "volume", "ret_1", "vol_realizada_30"]
+        X_all = df_base[features].copy()
+        y_all = make_horizon_target(df_base, horizon)
+        mask = y_all.notna()
+        X_all = X_all.loc[mask]
+        y_all = y_all.loc[mask]
 
         # Splits rolling-origin
         splits = rolling_origin_splits(
@@ -166,6 +169,7 @@ def objective_factory(
             if trial.should_prune():
                 raise optuna.TrialPruned()
 
+        trial.set_user_attr("horizon", int(horizon))
         return float(np.mean(rmses))
 
     return objective
@@ -181,7 +185,7 @@ def main() -> None:
     else:
         csv_path = args.csv
 
-    X, y = build_data(csv_path, args.rule, args.horizon, tuple(args.train), tuple(args.val), tuple(args.test))
+    df_base = build_base_df(csv_path, args.rule)
 
     optuna.logging.set_verbosity(optuna.logging.INFO)
     sampler = optuna.samplers.TPESampler(seed=args.seed)
@@ -191,7 +195,7 @@ def main() -> None:
         sampler=sampler,
         pruner=make_pruner(args.pruner),
     )
-    study.optimize(objective_factory(X, y, args), n_trials=args.n_trials, gc_after_trial=True)
+    study.optimize(objective_factory(df_base, args), n_trials=args.n_trials, gc_after_trial=True)
 
     print({"best_value": study.best_value, "best_params": study.best_params})
 
