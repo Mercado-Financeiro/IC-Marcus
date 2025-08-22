@@ -18,20 +18,19 @@ try:
     MLFLOW_AVAILABLE = True
 except ImportError:
     MLFLOW_AVAILABLE = False
-try:
-    import structlog
-    log = structlog.get_logger()
-except ImportError:
-    import logging
-    logging.basicConfig(level=logging.INFO)
-    log = logging.getLogger(__name__)
+# Logging will be initialized per instance to avoid issues
 
 import warnings
 from pathlib import Path
 import sys
 
-# Add parent to path
-sys.path.append(str(Path(__file__).parent.parent))
+# Add parent to path (notebook-safe)
+try:
+    base_path = Path(__file__).parent.parent
+except NameError:
+    # In notebook, __file__ doesn't exist
+    base_path = Path.cwd()
+sys.path.append(str(base_path))
 
 from data.splits import PurgedKFold
 from utils.determinism import set_deterministic_environment
@@ -75,16 +74,57 @@ class XGBoostOptuna:
         self.threshold_f1 = 0.5
         self.threshold_ev = 0.5
         
+        # Initialize logging (instance-level)
+        self.log = self._setup_logging()
+        
         # Set deterministic environment
         set_deterministic_environment(seed)
         
-        log.info(
+        self.log.info(
             "xgboost_optuna_initialized",
             n_trials=n_trials,
             cv_folds=cv_folds,
             embargo=embargo,
             pruner=pruner_type
         )
+    
+    def _setup_logging(self):
+        """Setup logging with fallback for missing structlog."""
+        try:
+            import structlog
+            return structlog.get_logger()
+        except ImportError:
+            import logging
+            logging.basicConfig(level=logging.INFO)
+            _pylog = logging.getLogger(__name__)
+            
+            class LogShim:
+                """Shim to make logging work like structlog."""
+                def info(self, event, **kw):
+                    extras = ", ".join(f"{k}={v}" for k, v in kw.items())
+                    _pylog.info(f"{event} | {extras}" if extras else event)
+                
+                def warning(self, event, **kw):
+                    extras = ", ".join(f"{k}={v}" for k, v in kw.items())
+                    _pylog.warning(f"{event} | {extras}" if extras else event)
+                
+                def error(self, event, **kw):
+                    extras = ", ".join(f"{k}={v}" for k, v in kw.items())
+                    _pylog.error(f"{event} | {extras}" if extras else event)
+            
+            return LogShim()
+    
+    def _calculate_scale_pos_weight(self, y: pd.Series) -> float:
+        """Calculate scale_pos_weight for class imbalance."""
+        n_neg = (y == 0).sum()
+        n_pos = (y == 1).sum()
+        
+        if n_pos == 0:
+            return 1.0
+        
+        weight = n_neg / n_pos
+        # Clip to reasonable range to avoid extreme values
+        return float(np.clip(weight, 0.1, 10.0))
     
     def _create_search_space(self, trial: optuna.Trial) -> Dict:
         """Create hyperparameter search space.
@@ -96,24 +136,26 @@ class XGBoostOptuna:
             Dictionary of hyperparameters
         """
         params = {
-            'max_depth': trial.suggest_int('max_depth', 3, 10),
-            'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
-            'gamma': trial.suggest_float('gamma', 0, 5),
-            'subsample': trial.suggest_float('subsample', 0.5, 0.95),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 0.95),
-            'eta': trial.suggest_float('eta', 0.01, 0.3, log=True),
-            'lambda': trial.suggest_float('lambda', 0.5, 5),
-            'alpha': trial.suggest_float('alpha', 0, 3),
-            'max_bin': trial.suggest_categorical('max_bin', [256, 512, 1024]),
-            'n_estimators': trial.suggest_int('n_estimators', 100, 2000),
+            'max_depth': trial.suggest_int('max_depth', 3, 8),
+            'min_child_weight': trial.suggest_float('min_child_weight', 0.5, 3.0),  # Menos restritivo
+            'gamma': trial.suggest_float('gamma', 0.0, 0.5),  # Muito menos agressivo
+            'subsample': trial.suggest_float('subsample', 0.7, 1.0),  # Range menor, valores maiores
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 1.0),  # Range menor
+            'learning_rate': trial.suggest_float('learning_rate', 0.05, 0.3, log=True),  # LR mínimo maior
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.01, 1.0),  # Muito menos agressivo
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 0.5),  # Menos agressivo
+            'max_delta_step': trial.suggest_float('max_delta_step', 0, 3),  # Para class imbalance
+            'max_bin': 256,
+            'n_estimators': 2000,  # Large number for early stopping
             
             # Fixed parameters
             'tree_method': 'hist',
             'objective': 'binary:logistic',
-            'eval_metric': 'auc',
-            'random_state': self.seed + trial.number,  # Different seed per trial for diversity
-            'verbosity': 0,
-            'n_jobs': -1
+            'eval_metric': 'aucpr',  # Better for imbalanced data
+            'random_state': self.seed,
+            'verbosity': 0,  # Reduce noise
+            'n_jobs': -1,
+            'early_stopping_rounds': 50  # Menos paciência para detectar não-aprendizado
         }
         
         return params
@@ -210,13 +252,18 @@ class XGBoostOptuna:
         Returns:
             Objective function
         """
-        # Adjust for class imbalance
-        pos_weight = (y == 0).sum() / (y == 1).sum() if (y == 1).sum() > 0 else 1.0
+        # Calculate scale_pos_weight consistently
+        pos_weight = self._calculate_scale_pos_weight(y)
         
         def objective(trial):
             # Get hyperparameters
             params = self._create_search_space(trial)
+            # Always add scale_pos_weight for consistency
             params['scale_pos_weight'] = pos_weight
+            
+            # Debug: Print first trial params
+            if trial.number == 0:
+                self.log.info("first_trial_params", params=params)
             
             # Create cross-validator
             cv = PurgedKFold(n_splits=self.cv_folds, embargo=self.embargo)
@@ -233,13 +280,10 @@ class XGBoostOptuna:
                 else:
                     w_train = None
                 
-                # Train model with early stopping in params
-                params_with_early_stopping = params.copy()
-                params_with_early_stopping['early_stopping_rounds'] = 50
+                # Create model with early stopping (XGBoost 3.x API)
+                model = xgb.XGBClassifier(**params)
                 
-                model = xgb.XGBClassifier(**params_with_early_stopping)
-                
-                # Fit model with proper eval_set
+                # Fit model with eval_set (early stopping handled by constructor)
                 model.fit(
                     X_train, y_train,
                     sample_weight=w_train,
@@ -250,6 +294,26 @@ class XGBoostOptuna:
                 # Skip calibration during optimization (only calibrate final model)
                 # This avoids overfitting on validation set
                 y_pred_proba = model.predict_proba(X_val)[:, 1]
+                
+                # Check if predictions are constant (indicates model not learning)
+                pred_std = y_pred_proba.std()
+                pred_mean = y_pred_proba.mean()
+                unique_preds = len(np.unique(np.round(y_pred_proba, 3)))
+                pred_range = y_pred_proba.max() - y_pred_proba.min()
+                
+                # Critérios mais flexíveis: múltiplas verificações
+                is_constant = (pred_std < 0.001 or 
+                              unique_preds < 5 or 
+                              pred_range < 0.01 or
+                              np.allclose(y_pred_proba, pred_mean, atol=0.001))
+                
+                if is_constant:
+                    self.log.warning("constant_predictions_detected", 
+                                   trial=trial.number, pred_std=pred_std, 
+                                   pred_mean=pred_mean, unique_count=unique_preds,
+                                   pred_range=pred_range)
+                    self.log.warning("sample_predictions", samples=y_pred_proba[:10].tolist())
+                    return -1.0  # Penalize trials with constant predictions
                 
                 # Optimize threshold for F1
                 threshold = self._optimize_threshold_f1(y_val, y_pred_proba)
@@ -274,7 +338,7 @@ class XGBoostOptuna:
                 
                 # Log trial metrics for debugging
                 if fold_idx == 0:  # Log only first fold to avoid spam
-                    log.info(
+                    self.log.info(
                         f"Trial {trial.number} Fold {fold_idx}: "
                         f"f1={f1:.4f}, pr_auc={pr_auc:.4f}, "
                         f"mcc={mcc:.4f}, brier={brier:.4f}, "
@@ -312,13 +376,23 @@ class XGBoostOptuna:
         if len(X) == 0 or len(y) == 0:
             raise ValueError("Empty data provided")
         
+        # Check for NaN/Inf in features
+        if X.isna().any().any() or np.isinf(X.values).any():
+            n_nan = X.isna().sum().sum()
+            n_inf = np.isinf(X.values).sum()
+            raise ValueError(f"Input data contains NaN ({n_nan}) or Inf ({n_inf}) values. Clean data first.")
+        
+        # Check for NaN in labels
+        if y.isna().any():
+            raise ValueError("Labels contain NaN values")
+        
         if len(np.unique(y)) < 2:
             raise ValueError("Only single class in labels")
         
         if len(X) < self.cv_folds * 2:
             raise ValueError(f"Insufficient data for {self.cv_folds}-fold CV")
         
-        log.info(
+        self.log.info(
             "starting_optimization",
             n_samples=len(X),
             n_features=X.shape[1],
@@ -348,7 +422,7 @@ class XGBoostOptuna:
         self.best_params = study.best_params
         self.best_score = study.best_value
         
-        log.info(
+        self.log.info(
             "optimization_complete",
             best_score=self.best_score,
             best_params=self.best_params,
@@ -384,28 +458,47 @@ class XGBoostOptuna:
         if self.best_params is None:
             raise ValueError("No best parameters found. Run optimize first.")
         
-        # Prepare parameters
+        # Prepare parameters (keep same API as optimization)
         params = self.best_params.copy()
         params.update({
             'tree_method': 'hist',
             'objective': 'binary:logistic',
-            'eval_metric': 'auc',
-            'random_state': self.seed,  # Fixed seed for final model
+            'eval_metric': 'aucpr',  # Consistent with optimization
+            'random_state': self.seed,
             'verbosity': 0,
-            'n_jobs': -1
+            'n_jobs': -1,
+            'early_stopping_rounds': 100  # Same early stopping as optimization
         })
         
-        # Adjust for class imbalance
-        pos_weight = (y == 0).sum() / (y == 1).sum() if (y == 1).sum() > 0 else 1.0
-        params['scale_pos_weight'] = pos_weight
+        # Use consistent scale_pos_weight calculation
+        params['scale_pos_weight'] = self._calculate_scale_pos_weight(y)
         
-        # Train model
-        model = xgb.XGBClassifier(**params)
-        model.fit(X, y, sample_weight=sample_weights)
+        # Train model with validation split for early stopping
+        from sklearn.model_selection import train_test_split
+        if len(X) > 100:  # Only split if we have enough data
+            X_train, X_val, y_train, y_val = train_test_split(
+                X, y, test_size=0.2, shuffle=False, stratify=None
+            )
+            model = xgb.XGBClassifier(**params)
+            model.fit(
+                X_train, y_train, 
+                sample_weight=sample_weights[:len(X_train)] if sample_weights is not None else None,
+                eval_set=[(X_val, y_val)],
+                verbose=False
+            )
+        else:
+            # Small dataset, train on all data without early stopping
+            params_no_early_stop = {k: v for k, v in params.items() if k != 'early_stopping_rounds'}
+            model = xgb.XGBClassifier(**params_no_early_stop)
+            model.fit(X, y, sample_weight=sample_weights, verbose=False)
         
-        # Calibrate (mandatory)
+        # Calibrate (mandatory) - use base model without early stopping for calibration
+        base_model_params = {k: v for k, v in params.items() if k != 'early_stopping_rounds'}
+        base_model = xgb.XGBClassifier(**base_model_params)
+        base_model.fit(X, y, sample_weight=sample_weights, verbose=False)
+        
         self.calibrator = CalibratedClassifierCV(
-            model, method='isotonic', cv=3
+            base_model, method='isotonic', cv=3
         )
         self.calibrator.fit(X, y)
         
@@ -416,13 +509,17 @@ class XGBoostOptuna:
         costs = {'fee_bps': 5, 'slippage_bps': 5}  # Default costs
         self.threshold_ev = self._optimize_threshold_ev(y, y_pred_proba, costs)
         
-        log.info(
+        self.log.info(
             "final_model_fitted",
             threshold_f1=self.threshold_f1,
             threshold_ev=self.threshold_ev
         )
         
         return model
+    
+    def train_final_model(self, X: pd.DataFrame, y: pd.Series, sample_weights: Optional[np.ndarray] = None) -> Any:
+        """Alias for fit_final_model to match expected interface."""
+        return self.fit_final_model(X, y, sample_weights)
     
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         """Predict probabilities with calibrated model.
@@ -481,7 +578,7 @@ class XGBoostOptuna:
             # Log model
             mlflow.xgboost.log_model(self.best_model, "xgboost_model")
             
-            log.info("mlflow_logging_complete")
+            self.log.info("mlflow_logging_complete")
             
         except Exception as e:
-            log.error("mlflow_logging_failed", error=str(e))
+            self.log.error("mlflow_logging_failed", error=str(e))

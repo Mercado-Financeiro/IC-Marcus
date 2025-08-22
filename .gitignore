@@ -62,10 +62,14 @@ Thumbs.db
 artifacts/
 
 # Dados (mantenha um README ou .gitkeep se quiser a pasta vazia no repo)
-/data/
+data/
 !data/.gitkeep
 !data/README.md
 
+# DVC (Data Version Control)
+.dvc/
+.dvcignore
+data.dvc
 
 # Documentos de agente/guia (não versionar)
 CLAUDE.md
@@ -73,14 +77,33 @@ AI_MEMORY.md
 CODE_MAP.md
 EXPERIMENTS.md
 .claude/
+
+# PRDs (Product Requirements Documents) - não versionar
 PRD XGBoost.md
 PRD LSTM.md
 PRD Otimização Bayesiana.md
 
-# Relatórios/arquivos locais não versionáveis
-PROGRESS_REPORT.md
-OPTIMIZATION_STATUS.md
-PROJECT_COMPLETION_REPORT.md
-FIX_REPORT.md
-training_log.txt
-requirements_temp.txt
+# Arquivos de diagnóstico e correção temporários
+diagnose_data_issue.py
+CORREÇÕES_APLICADAS.md
+ISSUES_FOUND.md
+
+# Testes de desenvolvimento temporários
+test_xgb_simple.py
+test_xgb_real_simple.py
+
+# Arquivos de configuração específicos
+.jupytext.toml
+
+# Segurança e auditoria
+.secrets.baseline
+
+# Arquivos de monitoramento temporários
+scripts/monitor_optimization.py
+scripts/monitor_training.py
+
+# Arquivos de deploy específicos
+scripts/deploy_model.py
+scripts/test_model_registry.py
+scripts/detect_secrets.py
+scripts/security_audit.py

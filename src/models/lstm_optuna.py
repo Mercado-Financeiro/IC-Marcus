@@ -25,33 +25,106 @@ from utils.determinism import set_deterministic_environment
 
 warnings.filterwarnings('ignore')
 
-# Try to import logging
+# Robust logging setup with fallback
 try:
     import structlog
     log = structlog.get_logger()
+    HAS_STRUCTLOG = True
 except ImportError:
     import logging
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     log = logging.getLogger(__name__)
+    HAS_STRUCTLOG = False
+
+class LoggerShim:
+    """Compatibility shim for structlog-style logging when structlog is not available."""
+    def __init__(self, logger):
+        self._logger = logger
+        
+    def info(self, msg, **kwargs):
+        extra_info = ' '.join(f'{k}={v}' for k, v in kwargs.items())
+        self._logger.info(f"{msg} {extra_info}" if extra_info else msg)
+        
+    def warning(self, msg, **kwargs):
+        extra_info = ' '.join(f'{k}={v}' for k, v in kwargs.items())
+        self._logger.warning(f"{msg} {extra_info}" if extra_info else msg)
+        
+    def error(self, msg, **kwargs):
+        extra_info = ' '.join(f'{k}={v}' for k, v in kwargs.items())
+        self._logger.error(f"{msg} {extra_info}" if extra_info else msg)
+        
+    def debug(self, msg, **kwargs):
+        extra_info = ' '.join(f'{k}={v}' for k, v in kwargs.items())
+        self._logger.debug(f"{msg} {extra_info}" if extra_info else msg)
+
+if not HAS_STRUCTLOG:
+    log = LoggerShim(log)
 
 
 def set_lstm_deterministic(seed: int = 42):
-    """Set deterministic behavior for LSTM training."""
+    """Set deterministic behavior for LSTM training with enhanced reproducibility."""
+    # Use base determinism function
     set_deterministic_environment(seed)
     
-    # Additional PyTorch specific settings
+    # PyTorch specific determinism
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
     
-    # Deterministic operations
-    torch.use_deterministic_algorithms(True)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    # Enhanced deterministic operations
+    try:
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    except Exception as e:
+        log.warning("partial_determinism_only", error=str(e))
     
     # Set number of threads for reproducibility
     torch.set_num_threads(1)
     
-    log.info("lstm_deterministic_mode_enabled", seed=seed)
+    # Additional environment variables for determinism
+    import os
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+    
+    log.info("lstm_deterministic_mode_enabled", seed=seed, torch_version=torch.__version__)
+
+
+def check_constant_predictions(y_pred_proba: np.ndarray, 
+                               threshold_std: float = 0.005, 
+                               min_unique: int = 10) -> bool:
+    """Check if predictions are essentially constant (similar to XGBoost version).
+    
+    Args:
+        y_pred_proba: Predicted probabilities
+        threshold_std: Minimum standard deviation required
+        min_unique: Minimum number of unique rounded predictions
+        
+    Returns:
+        True if predictions are constant, False otherwise
+    """
+    if len(y_pred_proba) == 0:
+        return True
+    
+    # Calculate statistics
+    pred_mean = np.mean(y_pred_proba)
+    pred_std = np.std(y_pred_proba)
+    unique_preds = len(np.unique(np.round(y_pred_proba, 4)))
+    
+    # Check if predictions are constant
+    is_constant = pred_std < threshold_std or unique_preds < min_unique
+    
+    if is_constant:
+        log.warning("constant_predictions_detected", 
+                   pred_mean=pred_mean, 
+                   pred_std=pred_std, 
+                   unique_count=unique_preds)
+        # Log sample predictions for debugging
+        sample_preds = y_pred_proba[:10].tolist() if len(y_pred_proba) >= 10 else y_pred_proba.tolist()
+        log.warning("sample_predictions", samples=sample_preds)
+    
+    return is_constant
 
 
 class LSTMModel(nn.Module):
@@ -127,11 +200,19 @@ class LSTMWrapper(BaseEstimator, ClassifierMixin):
         self.seq_len = seq_len
         self.device = device
         self.scaler = scaler
-        self._estimator_type = "classifier"  # Explicitly mark as classifier
-        self.classes_ = np.array([0, 1])  # Binary classification
+        
+        # Required sklearn classifier attributes
+        self._estimator_type = "classifier"
+        self.classes_ = np.array([0, 1])
+        self.n_features_in_ = None
+        self.n_classes_ = 2
         
     def fit(self, X, y):
-        # Model is already trained
+        # Model is already trained, but we need to set sklearn attributes
+        if hasattr(X, 'shape'):
+            self.n_features_in_ = X.shape[1]
+        elif hasattr(X, '__len__'):
+            self.n_features_in_ = len(X.columns) if hasattr(X, 'columns') else None
         return self
     
     def predict_proba(self, X):
@@ -154,7 +235,11 @@ class LSTMWrapper(BaseEstimator, ClassifierMixin):
         with torch.no_grad():
             proba = self.lstm_model(X_tensor).cpu().numpy()
         
-        # Return probabilities for both classes
+        # Flatten if needed
+        if proba.ndim > 1:
+            proba = proba.flatten()
+        
+        # Return probabilities for both classes (binary classification)
         proba_both = np.column_stack([1 - proba, proba])
         return proba_both
     
@@ -162,6 +247,21 @@ class LSTMWrapper(BaseEstimator, ClassifierMixin):
         """Predict classes."""
         proba = self.predict_proba(X)
         return (proba[:, 1] >= 0.5).astype(int)
+    
+    def decision_function(self, X):
+        """Decision function for binary classification."""
+        # Return log odds or raw predictions
+        proba = self.predict_proba(X)[:, 1]  # Probability of positive class
+        # Convert to log odds for decision function
+        proba = np.clip(proba, 1e-10, 1 - 1e-10)  # Avoid log(0)
+        return np.log(proba / (1 - proba))
+    
+    def _check_is_fitted(self):
+        """Check if model is fitted."""
+        if self.lstm_model is None:
+            from sklearn.exceptions import NotFittedError
+            raise NotFittedError("Model is not fitted yet.")
+        return True
     
     def _create_sequences(self, X):
         """Create sequences from dataframe."""
@@ -225,18 +325,30 @@ class LSTMOptuna:
         self.threshold_ev = 0.5
         self.scaler = None
         
+        # Instance-level logger for compatibility
+        self.log = log
+        
         # Set deterministic mode
         set_lstm_deterministic(seed)
         
         # Set device
         self.device = self._get_device()
         
+        # Validate inputs
+        if n_trials < 1:
+            raise ValueError("n_trials must be at least 1")
+        if cv_folds < 2:
+            raise ValueError("cv_folds must be at least 2")
+        if embargo < 0:
+            raise ValueError("embargo must be non-negative")
+        
         log.info(
             "lstm_optuna_initialized",
             n_trials=n_trials,
             cv_folds=cv_folds,
             embargo=embargo,
-            device=self.device.type
+            device=self.device.type,
+            deterministic=True
         )
     
     def _get_device(self) -> torch.device:
@@ -299,20 +411,27 @@ class LSTMOptuna:
         )
         return model.to(self.device)
     
-    def _create_search_space(self, trial: optuna.Trial) -> Dict:
+    def _create_search_space(self, trial: optuna.Trial, data_size: int = None) -> Dict:
         """Create hyperparameter search space.
         
         Args:
             trial: Optuna trial
+            data_size: Size of the dataset to adjust seq_len appropriately
             
         Returns:
             Dictionary of hyperparameters
         """
+        # Adjust seq_len based on data size
+        if data_size is not None:
+            max_seq_len = min(200, max(20, data_size // 4))  # At most 1/4 of data
+        else:
+            max_seq_len = 200
+            
         return {
             'hidden_size': trial.suggest_int('hidden_size', 32, 512),
             'num_layers': trial.suggest_int('num_layers', 1, 3),
             'dropout': trial.suggest_float('dropout', 0.0, 0.5),
-            'seq_len': trial.suggest_int('seq_len', 20, 200),
+            'seq_len': trial.suggest_int('seq_len', 20, max_seq_len),
             'lr': trial.suggest_float('lr', 1e-5, 1e-2, log=True),
             'batch_size': trial.suggest_categorical('batch_size', [16, 32, 64, 128, 256]),
             'weight_decay': trial.suggest_float('weight_decay', 0, 1e-3),
@@ -418,8 +537,8 @@ class LSTMOptuna:
         """Create objective function for Optuna."""
         
         def objective(trial):
-            # Get hyperparameters
-            params = self._create_search_space(trial)
+            # Get hyperparameters  
+            params = self._create_search_space(trial, data_size=len(X))
             
             # Create cross-validator
             cv = PurgedKFold(n_splits=self.cv_folds, embargo=self.embargo)
@@ -511,12 +630,25 @@ class LSTMOptuna:
                 # Calculate final score
                 _, val_preds, val_labels = self._validate(model, val_loader, criterion)
                 
-                # Optimize threshold and calculate F1
-                threshold = self._optimize_threshold_f1(val_labels.flatten(), val_preds.flatten())
-                y_pred = (val_preds.flatten() >= threshold).astype(int)
-                f1 = f1_score(val_labels.flatten(), y_pred)
+                # Check for constant predictions
+                val_preds_flat = val_preds.flatten()
+                if check_constant_predictions(val_preds_flat):
+                    log.warning("constant_predictions_penalty", 
+                               trial=trial.number, 
+                               fold=fold_idx)
+                    scores.append(-1.0)  # Penalty for constant predictions
+                    continue
                 
-                scores.append(f1)
+                # Optimize threshold and calculate F1
+                threshold = self._optimize_threshold_f1(val_labels.flatten(), val_preds_flat)
+                y_pred = (val_preds_flat >= threshold).astype(int)
+                
+                try:
+                    f1 = f1_score(val_labels.flatten(), y_pred)
+                    scores.append(f1)
+                except Exception as e:
+                    log.warning("f1_calculation_failed", error=str(e), trial=trial.number, fold=fold_idx)
+                    scores.append(0.0)
             
             return np.mean(scores) if scores else 0.0
         
@@ -588,12 +720,13 @@ class LSTMOptuna:
             y: Labels
         """
         if self.best_params is None:
-            # Use default parameters if not optimized
+            # Use default parameters if not optimized, adjusted for data size
+            max_seq_len = min(50, max(20, len(X) // 4))
             self.best_params = {
                 'hidden_size': 64,
                 'num_layers': 2,
                 'dropout': 0.2,
-                'seq_len': 50,
+                'seq_len': max_seq_len,
                 'lr': 0.001,
                 'batch_size': 32,
                 'weight_decay': 0.0001,
@@ -649,18 +782,35 @@ class LSTMOptuna:
             self.scaler
         )
         
-        # Calibrate
-        self.calibrator = CalibratedClassifierCV(
-            wrapper, method='isotonic', cv=3
-        )
-        self.calibrator.fit(X, y)
+        # Fit wrapper first (for sklearn compatibility)
+        wrapper.fit(X, y)
         
-        # Optimize thresholds
+        # Calibrate
+        try:
+            self.calibrator = CalibratedClassifierCV(
+                wrapper, method='isotonic', cv=3
+            )
+            self.calibrator.fit(X, y)
+        except Exception as e:
+            log.warning("calibration_failed", error=str(e))
+            # Fallback: use uncalibrated wrapper
+            self.calibrator = wrapper
+        
+        # Optimize thresholds - need to align with sequences
         y_pred_proba = self.predict_proba(X)
-        self.threshold_f1 = self._optimize_threshold_f1(y, y_pred_proba)
+        
+        # Align labels with predictions (account for sequence creation)
+        seq_len = self.best_params['seq_len']
+        if len(y_pred_proba) < len(y):
+            # Predictions are shorter due to sequence creation
+            y_aligned = y.iloc[seq_len-1:seq_len-1+len(y_pred_proba)]
+        else:
+            y_aligned = y
+            
+        self.threshold_f1 = self._optimize_threshold_f1(y_aligned, y_pred_proba)
         
         costs = {'fee_bps': 5, 'slippage_bps': 5}
-        self.threshold_ev = self._optimize_threshold_ev(y, y_pred_proba, costs)
+        self.threshold_ev = self._optimize_threshold_ev(y_aligned, y_pred_proba, costs)
         
         log.info(
             "lstm_final_model_fitted",

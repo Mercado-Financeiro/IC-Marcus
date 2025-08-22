@@ -131,8 +131,13 @@ class FeatureEngineer:
     def create_price_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Features baseadas em preço e retornos."""
         
-        # Retornos logarítmicos
-        df["returns"] = np.log(df["close"] / df["close"].shift(1))
+        # Retornos logarítmicos (com proteção contra log de valores <= 0)
+        price_ratio = df["close"] / df["close"].shift(1)
+        df["returns"] = np.where(
+            price_ratio > 0,
+            np.log(price_ratio),
+            0
+        )
         
         # Retornos para múltiplos períodos
         for period in self.lookback_periods:
@@ -145,10 +150,13 @@ class FeatureEngineer:
             # Média móvel exponencial
             df[f"ema_{period}"] = df["close"].ewm(span=period, adjust=False).mean()
             
-            # Distância do preço para SMA
-            df[f"price_to_sma_{period}"] = (
-                df["close"] - df[f"sma_{period}"]
-            ) / df[f"sma_{period}"]
+            # Distância do preço para SMA (com proteção contra divisão por zero)
+            sma_col = df[f"sma_{period}"]
+            df[f"price_to_sma_{period}"] = np.where(
+                sma_col != 0,
+                (df["close"] - sma_col) / sma_col,
+                0
+            )
             
             # Momentum
             df[f"momentum_{period}"] = df["close"] / df["close"].shift(period) - 1
@@ -186,27 +194,54 @@ class FeatureEngineer:
                 df[f"volatility_{period}"] * np.sqrt(365 * 24 * 4)  # 15min bars
             )
         
-        # Parkinson volatility (usando high-low)
+        # Parkinson volatility (usando high-low com proteção)
         for period in [10, 20, 50]:
-            hl_ratio = np.log(df["high"] / df["low"])
+            # Proteção contra divisão por zero e log de valores <= 0
+            hl_ratio_raw = df["high"] / df["low"]
+            hl_ratio = np.where(
+                hl_ratio_raw > 0,
+                np.log(np.maximum(hl_ratio_raw, 1.0001)),  # Evitar log(1) = 0
+                0.0001  # Valor pequeno para casos extremos
+            )
+            hl_series = pd.Series(hl_ratio, index=df.index)
             df[f"parkinson_vol_{period}"] = (
-                hl_ratio.rolling(period).apply(
+                hl_series.rolling(period).apply(
                     lambda x: np.sqrt(np.sum(x**2) / (4 * period * np.log(2)))
+                    if len(x) == period else np.nan
                 )
             )
         
-        # Garman-Klass volatility
+        # Garman-Klass volatility (com proteção)
         for period in [10, 20, 50]:
-            hl = np.log(df["high"] / df["low"]) ** 2
-            co = np.log(df["close"] / df["open"]) ** 2
-            df[f"gk_vol_{period}"] = np.sqrt(
-                0.5 * hl.rolling(period).mean() -
-                (2 * np.log(2) - 1) * co.rolling(period).mean()
+            # Proteção para high/low
+            hl_ratio = df["high"] / df["low"]
+            hl = np.where(
+                hl_ratio > 0,
+                np.log(np.maximum(hl_ratio, 1.0001)) ** 2,
+                0
             )
+            
+            # Proteção para close/open
+            co_ratio = df["close"] / df["open"]
+            co = np.where(
+                co_ratio > 0,
+                np.log(np.maximum(co_ratio, 1.0001)) ** 2,
+                0
+            )
+            
+            hl_series = pd.Series(hl, index=df.index)
+            co_series = pd.Series(co, index=df.index)
+            
+            gk_val = 0.5 * hl_series.rolling(period).mean() - \
+                     (2 * np.log(2) - 1) * co_series.rolling(period).mean()
+            
+            df[f"gk_vol_{period}"] = np.sqrt(np.maximum(gk_val, 0))
         
-        # Volatility ratio (short/long)
-        df["vol_ratio_10_50"] = df["volatility_10"] / (df["volatility_50"] + 1e-10)
-        df["vol_ratio_20_100"] = df["volatility_20"] / (df["volatility_100"] + 1e-10)
+        # Volatility ratio (short/long) - só criar se as colunas existirem
+        if "volatility_10" in df.columns and "volatility_50" in df.columns:
+            df["vol_ratio_10_50"] = df["volatility_10"] / (df["volatility_50"] + 1e-10)
+        if "volatility_20" in df.columns and "volatility_100" in df.columns:
+            df["vol_ratio_20_100"] = df["volatility_20"] / (df["volatility_100"] + 1e-10)
         
         return df
 

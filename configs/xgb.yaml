@@ -16,7 +16,7 @@ cv:
 xgb:
   # Core parameters
   objective: "binary:logistic"
-  eval_metric: "auc"
+  eval_metric: "aucpr"  # Melhor para dados desbalanceados
   tree_method: "hist"
   device: "cpu"  # Para determinismo garantido
   
@@ -25,9 +25,8 @@ xgb:
   max_depth: 6
   min_child_weight: 1
   
-  # Learning rate
+  # Learning rate  
   learning_rate: 0.05
-  eta: 0.05  # Alias para learning_rate
   
   # Regularização
   reg_alpha: 0.01   # L1 regularization
@@ -41,7 +40,7 @@ xgb:
   colsample_bynode: 1.0
   
   # Early stopping
-  early_stopping_rounds: 50
+  early_stopping_rounds: 100  # Mais paciência para aprendizado
   
   # Categorical features
   enable_categorical: false
@@ -90,9 +89,9 @@ optuna:
       log: true
       
     min_child_weight:
-      type: "int"
-      low: 1
-      high: 10
+      type: "float"
+      low: 1.0
+      high: 5.0
       
     reg_alpha:
       type: "float"
@@ -102,23 +101,22 @@ optuna:
     reg_lambda:
       type: "float" 
       low: 0.1
-      high: 10.0
-      log: true
+      high: 3.0  # Menos agressivo
       
     subsample:
       type: "float"
-      low: 0.5
+      low: 0.7  # Valores maiores
       high: 1.0
       
     colsample_bytree:
       type: "float"
-      low: 0.5
+      low: 0.7  # Valores maiores
       high: 1.0
       
     gamma:
       type: "float"
       low: 0.0
-      high: 5.0
+      high: 1.0  # Menos restritivo
       
 # Pós-processamento obrigatório
 postprocessing:
