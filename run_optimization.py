@@ -162,7 +162,18 @@ class OptimizationPipeline:
             )
             df, barrier_info = labeler.apply_triple_barrier(df)
             sample_weights = labeler.calculate_sample_weights(df, barrier_info)
-        
+
+            # Remover neutros (0) para classificação binária e mapear {-1,1} -> {0,1}
+            if 'label' in df.columns:
+                non_neutral_mask = df['label'] != 0
+                if sample_weights is not None:
+                    if not isinstance(sample_weights, pd.Series):
+                        sample_weights = pd.Series(sample_weights, index=df.index)
+                    sample_weights = sample_weights.loc[non_neutral_mask]
+                df = df.loc[non_neutral_mask].copy()
+                df['label'] = (df['label'] == 1).astype(int)
+
+        # Limpar NaNs após criação de labels e filtragem
         df = df.dropna()
         print(f"✅ Features: {len(feature_cols)} | Labels: {df['label'].value_counts().to_dict()}")
         
@@ -172,14 +183,10 @@ class OptimizationPipeline:
         
         # Alinhar sample_weights com X e y
         if sample_weights is not None:
-            # Garantir que sample_weights está alinhado com o DataFrame após dropna
-            if isinstance(sample_weights, pd.Series):
-                sample_weights = sample_weights.loc[df.index]
-            elif isinstance(sample_weights, np.ndarray):
-                # Se for array, precisa ter o mesmo tamanho que df após dropna
-                if len(sample_weights) != len(df):
-                    print(f"⚠️ Sample weights size mismatch. Weights: {len(sample_weights)}, Data: {len(df)}")
-                    sample_weights = None
+            # Converter para Series com mesmo índice e alinhar após dropna/filtragem
+            if not isinstance(sample_weights, pd.Series):
+                sample_weights = pd.Series(sample_weights, index=df.index)
+            sample_weights = sample_weights.loc[df.index]
         
         # Split temporal usando configuração
         split_config = data_config.get('split', {})
