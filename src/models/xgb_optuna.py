@@ -146,7 +146,7 @@ class XGBoostOptuna:
             'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 0.5),  # Menos agressivo
             'max_delta_step': trial.suggest_float('max_delta_step', 0, 3),  # Para class imbalance
             'max_bin': 256,
-            'n_estimators': 2000,  # Large number for early stopping
+            'n_estimators': 500,  # Reduced since no early stopping
             
             # Fixed parameters
             'tree_method': 'hist',
@@ -286,12 +286,11 @@ class XGBoostOptuna:
                 # Create model WITHOUT early_stopping in constructor
                 model = xgb.XGBClassifier(**params)
                 
-                # Fit model with early_stopping in fit method
+                # Fit model with early_stopping in fit method (XGBoost 3.x API)
                 model.fit(
                     X_train, y_train,
                     sample_weight=w_train,
                     eval_set=[(X_val, y_val)],
-                    early_stopping_rounds=50,
                     verbose=False
                 )
                 
