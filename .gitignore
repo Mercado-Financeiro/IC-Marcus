@@ -67,3 +67,12 @@ data/
 !data/README.md
 
 
+# Documentos de agente/guia (não versionar)
+CLAUDE.md
+AI_MEMORY.md
+CODE_MAP.md
+EXPERIMENTS.md
+.claude/
+PRD XGBoost.md
+PRD LSTM.md
+PRD Otimização Bayesiana.md
