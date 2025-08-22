@@ -1,0 +1,254 @@
+# configs/optuna.yaml - Configurações globais de otimização Bayesiana
+# Configurações centralizadas para Optuna seguindo PRD Otimização Bayesiana.md
+
+# Configurações globais
+global:
+  seed: 42
+  deterministic: true
+  n_jobs: 1                    # Single thread para determinismo
+  
+# Estudo base
+study:
+  # Criação do estudo
+  study_name: "crypto_ml_optimization"
+  direction: "maximize"        # maximize F1/PR-AUC
+  load_if_exists: true
+  
+  # Storage (opcional - SQLite local)
+  storage:
+    enabled: false
+    url: "sqlite:///artifacts/optuna_studies.db"
+    
+# Samplers (algoritmos de otimização)
+samplers:
+  # TPE (Tree-structured Parzen Estimator) - PADRÃO
+  tpe:
+    n_startup_trials: 10       # Random antes do TPE
+    n_ei_candidates: 24        # Candidatos EI
+    gamma: 0.25               # Percentil para split
+    weights: "uniform"        # uniform, rank
+    
+  # Random sampler (baseline)
+  random:
+    seed: 42
+    
+  # CMA-ES (Covariance Matrix Adaptation)
+  cmaes:
+    n_startup_trials: 10
+    restart_strategy: "ipop"
+    
+  # Algoritmo padrão por tipo de problema
+  default:
+    xgb: "tpe"
+    lstm: "tpe"
+    ensemble: "cmaes"
+    
+# Pruners (early stopping)
+pruners:
+  # MedianPruner - PADRÃO
+  median:
+    n_startup_trials: 5        # Trials antes de começar pruning
+    n_warmup_steps: 10         # Steps antes de pruning
+    interval_steps: 1          # Intervalo para check
+    
+  # SuccessiveHalvingPruner
+  successive_halving:
+    min_resource: 10           # Mínimo de epochs/estimators
+    reduction_factor: 3        # Fator de redução
+    min_early_stopping_rate: 0
+    
+  # HyperbandPruner (mais agressivo)
+  hyperband:
+    min_resource: 10
+    max_resource: 100          # Máximo de epochs/estimators
+    reduction_factor: 3
+    
+  # Percentile pruner
+  percentile:
+    percentile: 25.0           # Prune bottom 25%
+    n_startup_trials: 5
+    n_warmup_steps: 10
+    
+  # Algoritmo padrão por tipo
+  default:
+    xgb: "hyperband"           # XGB treina rápido
+    lstm: "median"             # LSTM mais custoso
+    
+# Métricas objetivo
+objectives:
+  # Métrica primária para otimização
+  primary: "f1_score"          # f1_score, pr_auc, roc_auc
+  
+  # Multi-objective (opcional)
+  multi_objective:
+    enabled: false
+    metrics: ["f1_score", "sharpe_ratio"]
+    weights: [0.7, 0.3]
+    
+  # Constraints (restrições)
+  constraints:
+    brier_score_max: 0.25      # Brier < 0.25
+    training_time_max: 3600    # Máximo 1h por trial
+    
+# Configurações por modelo
+model_specific:
+  xgb:
+    n_trials: 100
+    timeout: 3600              # 1 hora
+    sampler: "tpe"
+    pruner: "hyperband"
+    
+    # Callbacks
+    callbacks:
+      - "early_stopping"
+      - "progress_bar"
+      
+  lstm:
+    n_trials: 50               # Menos trials (mais custoso)
+    timeout: 7200              # 2 horas
+    sampler: "tpe"
+    pruner: "median"
+    
+    callbacks:
+      - "early_stopping"
+      - "progress_bar"
+      
+  ensemble:
+    n_trials: 25               # Ainda menos
+    timeout: 1800              # 30 min
+    sampler: "cmaes"
+    pruner: "percentile"
+    
+# Logging e tracking
+logging:
+  # Nível de verbosidade
+  verbosity: "WARNING"         # DEBUG, INFO, WARNING, ERROR
+  
+  # Integração com MLflow
+  mlflow:
+    enabled: true
+    log_params: true
+    log_metrics: true
+    log_artifacts: true
+    
+    # Tags automáticas
+    auto_tags:
+      - "optuna_version"
+      - "sampler_type"
+      - "pruner_type"
+      - "n_trials"
+      
+# Visualizações automáticas
+visualization:
+  enabled: true
+  auto_generate: true
+  
+  # Tipos de plots
+  plots:
+    - "optimization_history"
+    - "param_importances"
+    - "parallel_coordinate"
+    - "slice"
+    - "contour"
+    - "edf"                    # Empirical Distribution Function
+    
+  # Configurações dos plots
+  plot_config:
+    width: 800
+    height: 600
+    save_format: "png"
+    dpi: 300
+    
+# Estratégias de busca avançadas
+search_strategies:
+  # Warm start com runs anteriores
+  warm_start:
+    enabled: false
+    source_study: null         # Nome do estudo anterior
+    
+  # Multi-fidelity optimization
+  multi_fidelity:
+    enabled: false
+    fidelity_param: "n_estimators"  # Para XGB
+    
+  # Bayesian optimization with GP
+  gaussian_process:
+    enabled: false
+    acquisition_function: "ei"  # ei, poi, lcb
+    
+# Paralelização
+parallelization:
+  # Distributed optimization
+  distributed:
+    enabled: false
+    n_workers: 1
+    
+  # Concurrent trials
+  concurrent:
+    enabled: false
+    max_concurrent: 4
+    
+# Configurações de performance
+performance:
+  # Memory management
+  memory:
+    max_trials_in_memory: 1000
+    cleanup_interval: 100
+    
+  # Checkpointing
+  checkpointing:
+    enabled: true
+    interval: 10               # A cada 10 trials
+    path: "artifacts/optuna_checkpoints"
+    
+# Validação e debugging
+validation:
+  # Validar espaço de busca
+  validate_search_space: true
+  
+  # Timeout por trial
+  trial_timeout: 3600          # 1 hora máximo
+  
+  # Retry em caso de falha
+  retry:
+    enabled: true
+    max_retries: 3
+    backoff_factor: 2
+    
+# Configurações específicas para diferentes objetivos
+objective_specific:
+  f1_score:
+    direction: "maximize"
+    threshold_optimization: true
+    
+  pr_auc:
+    direction: "maximize"
+    threshold_optimization: true
+    
+  brier_score:
+    direction: "minimize"
+    threshold_optimization: false
+    
+  sharpe_ratio:
+    direction: "maximize"
+    threshold_optimization: true
+    
+# Configurações de produção
+production:
+  # Champion/Challenger
+  champion_challenger:
+    enabled: false
+    challenger_threshold: 0.05  # 5% melhoria mínima
+    
+  # Auto-deployment
+  auto_deploy:
+    enabled: false
+    deploy_threshold: 0.1      # 10% melhoria
+    
+# Fast mode para desenvolvimento
+fast_mode:
+  enabled: false
+  n_trials_override: 5
+  timeout_override: 300        # 5 minutos
+  disable_pruning: false
+  simplified_plots: true

@@ -1,0 +1,201 @@
+# configs/xgb.yaml - Configurações XGBoost
+# Baseado no PRD XGBoost.md e otimizações testadas
+
+# Configurações básicas
+seed: 42
+deterministic: true
+
+# Cross-validation
+cv:
+  method: "purged_kfold"
+  n_splits: 5
+  embargo: 10  # barras
+  shuffle: false
+  
+# XGBoost hiperparâmetros base
+xgb:
+  # Core parameters
+  objective: "binary:logistic"
+  eval_metric: "auc"
+  tree_method: "hist"
+  device: "cpu"  # Para determinismo garantido
+  
+  # Estrutura das árvores
+  n_estimators: 500
+  max_depth: 6
+  min_child_weight: 1
+  
+  # Learning rate
+  learning_rate: 0.05
+  eta: 0.05  # Alias para learning_rate
+  
+  # Regularização
+  reg_alpha: 0.01   # L1 regularization
+  reg_lambda: 1.0   # L2 regularization
+  gamma: 0.0        # Min split loss
+  
+  # Sampling
+  subsample: 0.8
+  colsample_bytree: 0.8
+  colsample_bylevel: 1.0
+  colsample_bynode: 1.0
+  
+  # Early stopping
+  early_stopping_rounds: 50
+  
+  # Categorical features
+  enable_categorical: false
+  
+  # Multi-threading
+  n_jobs: 1  # Single thread para determinismo
+  
+  # Verbosity
+  verbosity: 1
+  
+# Otimização Bayesiana com Optuna
+optuna:
+  enabled: true
+  n_trials: 100
+  timeout: 3600  # 1 hora máximo
+  
+  # Pruning
+  pruner:
+    type: "hyperband"
+    min_resource: 10
+    max_resource: 100
+    reduction_factor: 3
+    
+  # Sampler
+  sampler:
+    type: "tpe"
+    n_startup_trials: 10
+    
+  # Espaço de busca
+  search_space:
+    n_estimators:
+      type: "int"
+      low: 100
+      high: 1000
+      step: 50
+      
+    max_depth:
+      type: "int" 
+      low: 3
+      high: 10
+      
+    learning_rate:
+      type: "float"
+      low: 0.01
+      high: 0.3
+      log: true
+      
+    min_child_weight:
+      type: "int"
+      low: 1
+      high: 10
+      
+    reg_alpha:
+      type: "float"
+      low: 0.0
+      high: 1.0
+      
+    reg_lambda:
+      type: "float" 
+      low: 0.1
+      high: 10.0
+      log: true
+      
+    subsample:
+      type: "float"
+      low: 0.5
+      high: 1.0
+      
+    colsample_bytree:
+      type: "float"
+      low: 0.5
+      high: 1.0
+      
+    gamma:
+      type: "float"
+      low: 0.0
+      high: 5.0
+      
+# Pós-processamento obrigatório
+postprocessing:
+  # Calibração obrigatória
+  calibration:
+    enabled: true
+    method: "isotonic"  # ou "sigmoid"
+    cv: "prefit"       # Usar validação separada
+    
+  # Threshold optimization
+  threshold_tuning:
+    enabled: true
+    methods: ["f1", "pr_auc", "ev_net"]
+    
+    # Threshold por EV líquido (PRD obrigatório)
+    ev_optimization:
+      cost_per_trade_bps: 10  # fee + slippage
+      min_threshold: 0.1
+      max_threshold: 0.9
+      step: 0.01
+      
+# Interpretabilidade
+interpretability:
+  shap:
+    enabled: true
+    explainer: "tree"
+    max_samples: 1000
+    
+  feature_importance:
+    methods: ["gain", "weight", "cover", "total_gain", "total_cover"]
+    
+  permutation_importance:
+    enabled: true
+    n_repeats: 5
+    random_state: 42
+    
+# Quantile regression (PRD XGBoost)
+quantile:
+  enabled: false  # Opcional, model separado
+  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+  
+# Custos para threshold EV
+costs:
+  fee_bps: 5.0
+  slippage_bps: 5.0
+  funding_apr: 0.0
+  borrow_apr: 0.0
+  total_bps: 10.0  # fee + slippage
+  
+# Métricas alvo (DoD)
+targets:
+  f1_score: 0.6
+  pr_auc: 0.6
+  roc_auc: 0.65
+  brier_score_max: 0.25
+  
+# Logging e tracking
+logging:
+  mlflow:
+    enabled: true
+    experiment: "xgboost_optimization"
+    tags:
+      model_type: "xgboost"
+      prd_name: "PRD_XGB"
+      prd_version: "1.0.0"
+      exec_rule: "next_bar_open"
+      
+  artifacts:
+    save_model: true
+    save_calibrator: true
+    save_shap: true
+    save_plots: true
+    
+# Fast mode para testes
+fast_mode:
+  enabled: false
+  n_trials: 5
+  n_estimators: 50
+  max_depth: 3
+  early_stopping_rounds: 10

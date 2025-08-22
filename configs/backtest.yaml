@@ -1,0 +1,210 @@
+# configs/backtest.yaml - Configurações de backtest
+# Execução t+1 com custos realistas seguindo CLAUDE.md
+
+# Capital e configurações básicas
+capital:
+  initial_capital: 100000.0
+  currency: "USDT"
+  
+# Configurações de posição
+position:
+  mode: "long_short"    # long_only, short_only, long_short
+  allow_short: true
+  max_positions: 1      # Uma posição por vez
+  
+# Execução (CRÍTICO - t+1 obrigatório)
+execution:
+  rule: "next_bar_open"     # Sinal em t, execução na abertura de t+1
+  price_reference: "open"   # open, close, vwap
+  partial_fills: false      # Execução completa ou nada
+  min_lot_size: 0.0001     # Tamanho mínimo da ordem
+  
+  # Slippage model
+  slippage:
+    model: "linear"         # linear, sqrt, fixed
+    bps_per_trade: 5.0      # Base slippage
+    market_impact_factor: 0.1
+    
+# Gestão de risco
+risk:
+  max_leverage: 1.0         # Sem alavancagem por default
+  position_limit_pct: 0.95 # Máximo 95% do capital
+  
+  # Stop loss dinâmico (opcional)
+  stop_loss:
+    enabled: false
+    type: "trailing"        # fixed, trailing, atr
+    pct: 0.05              # 5%
+    
+  # Take profit (opcional)
+  take_profit:
+    enabled: false
+    type: "fixed"
+    pct: 0.10              # 10%
+    
+# Sizing da posição
+sizing:
+  method: "volatility_target"  # fixed, percent_capital, volatility_target, kelly
+  
+  # Para volatility_target
+  volatility_target:
+    annual_vol: 0.15        # 15% volatilidade anualizada
+    lookback_days: 60       # Janela para calcular vol realizada
+    min_weight: 0.01        # Peso mínimo
+    max_weight: 0.50        # Peso máximo
+    
+  # Para fixed/percent
+  fixed:
+    position_size: 10000    # Tamanho fixo em USDT
+    
+  percent_capital:
+    allocation: 0.20        # 20% do capital
+    
+  # Kelly criterion (experimental)
+  kelly:
+    enabled: false
+    fraction: 0.25          # 25% do Kelly
+    lookback: 252           # Dias para estatísticas
+    
+# Custos de transação (CRÍTICO)
+costs:
+  # Fees de corretagem
+  fee_structure: "percentage"  # percentage, fixed, tiered
+  fee_bps: 5.0                # 5 bps por lado
+  
+  # Slippage
+  slippage_bps: 5.0           # 5 bps adicional
+  
+  # Funding costs (perpetual futures)
+  funding:
+    enabled: true
+    annual_rate: 0.0          # 0% default, pode ser atualizado
+    calculation: "pro_rata"   # pro_rata, end_of_day
+    
+  # Borrow costs (short selling)
+  borrow:
+    enabled: true
+    annual_rate: 0.0          # 0% para criptos (sintético)
+    
+  # Custos fixos por trade
+  fixed_costs:
+    per_trade: 0.0            # Sem custos fixos
+    
+# Horários de negociação
+trading_hours:
+  # Para criptos: 24/7
+  start_time: "00:00"
+  end_time: "23:59"
+  timezone: "UTC"
+  
+  # Dias da semana (0=segunda, 6=domingo)
+  trading_days: [0, 1, 2, 3, 4, 5, 6]
+  
+  # Feriados (opcional)
+  holidays: []
+  
+# Benchmark
+benchmark:
+  enabled: true
+  symbol: "BTCUSDT"           # Buy & hold do ativo
+  rebalance_freq: "never"     # never, daily, weekly, monthly
+  
+# Métricas de performance
+metrics:
+  # Retorno
+  return_metrics:
+    - "total_return"
+    - "annual_return"
+    - "monthly_returns"
+    - "daily_returns"
+    
+  # Risco
+  risk_metrics:
+    - "volatility"
+    - "max_drawdown"
+    - "var_95"               # Value at Risk 95%
+    - "cvar_95"              # Conditional VaR
+    - "skewness"
+    - "kurtosis"
+    
+  # Ratio metrics
+  ratio_metrics:
+    - "sharpe_ratio"
+    - "sortino_ratio"
+    - "calmar_ratio"
+    - "information_ratio"
+    
+  # Trading specific
+  trading_metrics:
+    - "win_rate"
+    - "avg_win"
+    - "avg_loss"
+    - "profit_factor"
+    - "turnover"
+    - "num_trades"
+    
+# Análise de regime (opcional)
+regime_analysis:
+  enabled: false
+  method: "volatility_quantiles"  # volatility_quantiles, hmm
+  regimes: ["low_vol", "medium_vol", "high_vol"]
+  
+# Configurações de output
+output:
+  # Relatórios
+  generate_report: true
+  report_format: ["html", "pdf"]
+  
+  # Plots
+  save_plots: true
+  plot_types:
+    - "equity_curve"
+    - "drawdown"
+    - "monthly_returns"
+    - "rolling_sharpe"
+    - "returns_distribution"
+    
+  # Dados
+  save_trades: true
+  save_positions: true
+  save_pnl: true
+  
+# Performance e debugging
+performance:
+  # Vectorização
+  vectorized: true
+  
+  # Logging
+  log_trades: true
+  log_level: "INFO"
+  
+  # Validações
+  validate_signals: true
+  validate_prices: true
+  
+# Métricas target para validação
+targets:
+  sharpe_ratio_min: 1.0       # Sharpe > 1.0
+  max_drawdown_max: -0.20     # MDD < 20%
+  win_rate_min: 0.45          # Win rate > 45%
+  total_return_min: 0.10      # Return > 10% anual
+  
+# Configurações específicas para diferentes tipos de ativo
+asset_specific:
+  crypto:
+    min_trade_size: 10.0      # Mínimo $10 USDT
+    precision: 8              # Decimais
+    
+  fx:
+    min_trade_size: 1000.0
+    precision: 5
+    
+  stocks:
+    min_trade_size: 100.0
+    precision: 2
+    
+# Fast mode para testes
+fast_mode:
+  enabled: false
+  max_trades: 100
+  skip_detailed_metrics: true

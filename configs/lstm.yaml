@@ -1,0 +1,245 @@
+# configs/lstm.yaml - Configurações LSTM
+# Baseado no PRD LSTM.md e implementação probabilística
+
+# Configurações básicas
+seed: 42
+deterministic: true
+
+# Dados e preprocessing
+data:
+  sequence_length: 64    # Janela temporal para LSTM
+  stride: 1             # Step para sequências
+  min_sequence_length: 32
+  
+  # Normalização
+  scaler:
+    type: "standard"    # standard, robust, minmax
+    fit_on_train: true  # Sempre fitar apenas no treino
+    
+  # Features para LSTM (menos que XGBoost)
+  feature_groups:
+    price: true
+    technical: true
+    microstructure: false  # Muito ruidosas para LSTM
+    derivatives: true
+    
+# Cross-validation
+cv:
+  method: "purged_kfold"
+  n_splits: 5
+  embargo: 10
+  shuffle: false
+  
+# Arquitetura LSTM
+model:
+  # Estrutura base
+  input_size: null      # Auto-detectado
+  hidden_size: 128
+  num_layers: 2
+  dropout: 0.2
+  bidirectional: false
+  
+  # Cabeça de saída
+  output_size: 1
+  activation: "sigmoid"
+  
+  # Atenção (PRD LSTM)
+  attention:
+    enabled: true
+    heads: 4
+    dropout: 0.1
+    
+  # Probabilistic head (PRD LSTM)
+  probabilistic:
+    enabled: true
+    distribution: "normal"  # normal, beta
+    uncertainty_type: "aleatoric"  # aleatoric, epistemic, both
+    
+# Treinamento
+training:
+  # Otimizador
+  optimizer: "adam"
+  learning_rate: 0.001
+  weight_decay: 1e-4
+  
+  # Scheduler
+  scheduler:
+    type: "cosine"      # cosine, step, plateau
+    warmup_epochs: 5
+    
+  # Batch e épocas
+  batch_size: 256
+  epochs: 100
+  
+  # Early stopping
+  early_stopping:
+    patience: 10
+    monitor: "val_loss"
+    mode: "min"
+    min_delta: 1e-4
+    
+  # Gradient clipping
+  gradient_clipping:
+    enabled: true
+    max_norm: 1.0
+    
+# Loss function
+loss:
+  # Para classificação probabilística (PRD LSTM)
+  primary: "nll"        # negative log-likelihood
+  
+  # Losses auxiliares
+  auxiliary:
+    bce_weight: 0.3     # Binary cross-entropy
+    focal_weight: 0.0   # Focal loss para desbalanceamento
+    
+  # Regularização
+  regularization:
+    l1_weight: 0.0
+    l2_weight: 1e-4
+    
+# Otimização Bayesiana
+optuna:
+  enabled: true
+  n_trials: 50          # Menos que XGB (mais custoso)
+  timeout: 7200         # 2 horas máximo
+  
+  # Pruning
+  pruner:
+    type: "median"
+    n_startup_trials: 5
+    n_warmup_steps: 10
+    
+  # Sampler
+  sampler:
+    type: "tpe"
+    n_startup_trials: 10
+    
+  # Espaço de busca
+  search_space:
+    hidden_size:
+      type: "categorical"
+      choices: [64, 128, 256, 512]
+      
+    num_layers:
+      type: "int"
+      low: 1
+      high: 3
+      
+    dropout:
+      type: "float"
+      low: 0.0
+      high: 0.5
+      
+    sequence_length:
+      type: "categorical"
+      choices: [32, 64, 128, 256]
+      
+    learning_rate:
+      type: "float"
+      low: 1e-5
+      high: 1e-2
+      log: true
+      
+    batch_size:
+      type: "categorical"
+      choices: [128, 256, 512]
+      
+    weight_decay:
+      type: "float"
+      low: 1e-6
+      high: 1e-3
+      log: true
+      
+    gradient_clip:
+      type: "float"
+      low: 0.1
+      high: 2.0
+      
+# Pós-processamento
+postprocessing:
+  # Monte Carlo Dropout para incerteza (PRD LSTM)
+  mc_dropout:
+    enabled: true
+    n_samples: 100
+    
+  # Calibração obrigatória
+  calibration:
+    enabled: true
+    method: "isotonic"
+    cv: "prefit"
+    
+  # Threshold optimization
+  threshold_tuning:
+    enabled: true
+    methods: ["f1", "pr_auc", "ev_net"]
+    
+# Custos para threshold EV
+costs:
+  fee_bps: 5.0
+  slippage_bps: 5.0
+  total_bps: 10.0
+  
+# Hardware
+hardware:
+  device: "cpu"         # cpu, cuda, mps
+  mixed_precision: false
+  compile_model: false  # PyTorch 2.0 compile
+  
+# Interpretabilidade
+interpretability:
+  # Attention weights
+  attention_analysis:
+    enabled: true
+    save_weights: true
+    
+  # Feature importance via permutation
+  permutation:
+    enabled: true
+    n_repeats: 5
+    
+  # SHAP para LSTM (custoso)
+  shap:
+    enabled: false
+    explainer: "deep"
+    max_samples: 100
+    
+# Métricas alvo
+targets:
+  f1_score: 0.55        # Menor que XGB (mais difícil)
+  pr_auc: 0.55
+  roc_auc: 0.60
+  brier_score_max: 0.25
+  nll_max: 0.7          # Negative log-likelihood
+  
+# Logging
+logging:
+  mlflow:
+    enabled: true
+    experiment: "lstm_optimization"
+    tags:
+      model_type: "lstm"
+      prd_name: "PRD_LSTM"
+      prd_version: "1.0.0"
+      exec_rule: "next_bar_open"
+      
+  artifacts:
+    save_model: true
+    save_calibrator: true
+    save_attention: true
+    save_plots: true
+    
+  # TensorBoard (opcional)
+  tensorboard:
+    enabled: false
+    log_dir: "artifacts/tensorboard"
+    
+# Fast mode para testes
+fast_mode:
+  enabled: false
+  n_trials: 3
+  epochs: 10
+  batch_size: 128
+  sequence_length: 32
+  hidden_size: 64
+  early_stopping_patience: 3

@@ -1,0 +1,121 @@
+# configs/data.yaml - Configurações de dados e features
+# Configurações seguindo CLAUDE.md e PRDs
+
+# Dados base
+data:
+  symbols: ["BTCUSDT", "ETHUSDT", "ADAUSDT", "DOTUSDT"]
+  timeframes: ["5m", "15m", "1h", "4h"]
+  start_date: "2020-01-01"
+  end_date: "2024-12-31"
+  timezone: "UTC"  # timezone-aware obrigatório
+  
+# Unidades padronizadas
+units:
+  returns: "log"    # log returns
+  costs: "bps"      # basis points
+  
+# Configurações de cache
+cache:
+  enabled: true
+  path: "data/processed"
+  format: "parquet"
+  compress: "snappy"
+
+# Feature Engineering
+features:
+  # Períodos básicos para indicadores
+  lookback_periods: [5, 10, 20, 50, 100, 200]
+  
+  # Features de preço
+  price_features:
+    - returns
+    - log_returns
+    - realized_volatility
+    - price_momentum
+    - price_acceleration
+    
+  # Indicadores técnicos
+  technical_indicators:
+    rsi:
+      periods: [14, 21, 30]
+    macd:
+      fast: 12
+      slow: 26
+      signal: 9
+    bollinger_bands:
+      period: 20
+      std: 2
+    atr:
+      period: 14
+    stochastic:
+      k_period: 14
+      d_period: 3
+      
+  # Features avançadas (PRDs)
+  microstructure:
+    enabled: true
+    features:
+      - order_book_imbalance
+      - vpin
+      - kyle_lambda
+      - roll_measure
+      - amihud_illiquidity
+      
+  derivatives:
+    enabled: true
+    features:
+      - funding_rate
+      - open_interest_ratio
+      - liquidation_levels
+      - basis_spread
+      
+# Labeling
+labels:
+  method: "triple_barrier"
+  horizon_minutes: 15  # Fixed horizon
+  
+  # Triple Barrier parameters
+  triple_barrier:
+    pt_multiplier: 2.0    # take profit (2x stop loss)
+    sl_multiplier: 1.5    # stop loss multiplier
+    max_holding_periods: 
+      "5m": 60    # 5 horas
+      "15m": 96   # 24 horas  
+      "1h": 168   # 7 dias
+      "4h": 42    # 7 dias
+    min_return: 0.002     # Mínimo 20 bps
+    
+# Splits temporais
+split:
+  method: "purged_kfold"
+  test_size: 0.2
+  val_size: 0.2
+  
+  # Purged K-Fold
+  purged_kfold:
+    n_splits: 5
+    embargo: 10  # barras de embargo
+    
+  # Walk Forward (alternativo)
+  walk_forward:
+    n_splits: 5
+    gap: 5       # gap entre treino e validação
+    
+# Validação de schemas
+schema:
+  validate_on_load: true
+  required_columns: ["open", "high", "low", "close", "volume"]
+  datetime_index: true
+  allow_na_ratio: 0.05  # Máximo 5% de NAs permitidos
+
+# Configurações de performance
+performance:
+  chunk_size: 10000
+  parallel_processing: true
+  n_jobs: -1  # Usar todos os cores disponíveis
+  
+# Logging
+logging:
+  level: "INFO"
+  format: "structured"
+  include_timings: true
