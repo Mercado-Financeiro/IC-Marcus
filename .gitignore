@@ -76,3 +76,11 @@ EXPERIMENTS.md
 PRD XGBoost.md
 PRD LSTM.md
 PRD Otimização Bayesiana.md
+
+# Relatórios/arquivos locais não versionáveis
+PROGRESS_REPORT.md
+OPTIMIZATION_STATUS.md
+PROJECT_COMPLETION_REPORT.md
+FIX_REPORT.md
+training_log.txt
+requirements_temp.txt
