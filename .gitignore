@@ -62,7 +62,7 @@ Thumbs.db
 artifacts/
 
 # Dados (mantenha um README ou .gitkeep se quiser a pasta vazia no repo)
-data/
+/data/
 !data/.gitkeep
 !data/README.md
 
