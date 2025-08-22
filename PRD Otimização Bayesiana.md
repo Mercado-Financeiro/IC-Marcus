@@ -11,7 +11,7 @@ Definir e padronizar um pipeline de **Otimização Bayesiana (BO)** com validaç
 ## 2) Objetivos
 
 * **O1.** Maximizar a métrica de validação por tarefa: classificação (F1/PR-AUC) e regressão/quantis (MAE/RMSE, pinball).
-* **O2.** Impedir vazamento temporal via **TimeSeriesSplit** ou **Purged K-Fold com embargo** quando houver janelas sobrepostas (triple-barrier, por exemplo). ([scikit-learn.org][4], [Towards AI][5], [GitHub][6])
+* **O2.** Impedir vazamento temporal via **TimeSeriesSplit** ou **Purged K-Fold com embargo** quando houver janelas sobrepostas (features/targets com lookahead). ([scikit-learn.org][4], [Towards AI][5], [GitHub][6])
 * **O3.** Reduzir custo de busca com **pruners** (Median, Successive Halving/ASHA, Hyperband) e execução paralela (Dask + Optuna). ([optuna.readthedocs.io][7], [OptunaHub][2], [docs.dask.org][8], [jrbourbeau.github.io][9])
 * **O4.** Padronizar calibração e ajuste de limiar em classificação para refletir F1/PR-AUC reais. ([scikit-learn.org][10])
 
@@ -28,8 +28,8 @@ Definir e padronizar um pipeline de **Otimização Bayesiana (BO)** com validaç
 
 ## 4) Dados e rotulagem (contexto do objetivo)
 
-* **Séries intraday/dia:** OHLCV e derivativos (funding/OI); labels direcional/triple-barrier opcional. ([mlfinpy.readthedocs.io][12])
-* **Rotulagem robusta (opcional):** **Triple-Barrier** e meta-labeling; requer purging/embargo na validação. ([GitHub][13], [mlfinpy.readthedocs.io][12])
+* **Séries intraday/dia:** OHLCV e derivativos (funding/OI); labels direcionais por retorno futuro com limiar. ([mlfinpy.readthedocs.io][12])
+* **Rotulagem (opcional):** meta-labeling; requer purging/embargo na validação quando eventos se sobrepõem. ([GitHub][13])
 
 ---
 
@@ -153,7 +153,7 @@ Definir e padronizar um pipeline de **Otimização Bayesiana (BO)** com validaç
 * **BoTorch/GP-BO**: introdução, otimização de função de aquisição. ([botorch.org][3])
 * **TimeSeriesSplit** (scikit-learn). ([scikit-learn.org][4])
 * **Purged K-Fold/Embargo** e **CPCV** (implementações e guias). ([GitHub][6], [Towards AI][5])
-* **Triple-Barrier** (conceito e libs abertas). ([mlfinpy.readthedocs.io][12])
+* (removido) Triple-Barrier.
 * **XGBoost parameters & tuning notes**. ([xgboost.readthedocs.io][18])
 * **Calibração de probabilidades** (scikit-learn). ([scikit-learn.org][10])
 * **BO clássica**: TPE (Bergstra) e GP-EI (Snoek). ([papers.neurips.cc][19], [papers.nips.cc][17])

@@ -10,7 +10,7 @@ Aprender padrões de preço e microestrutura de criptoativos 24/7 para prever re
 
 ## 1) Objetivo do produto
 
-* **Primário:** prever retornos futuros (p.ex., 1 a 60 min à frente) e/ou classificar direção/“hit” de barreiras (take-profit/stop) para apoiar execução e sinalização.
+* **Primário:** prever retornos futuros (p.ex., 1 a 60 min à frente) e/ou classificar direção com rótulo binário e abstenção por threshold para apoiar execução e sinalização.
 * **Secundário:** fornecer bandas/quantis de incerteza (previsão probabilística) e explainability de drivers.
 
 **Não-objetivos:** fazer market making, otimizar carteira, ou operar de fato.
@@ -77,7 +77,7 @@ Aprender padrões de preço e microestrutura de criptoativos 24/7 para prever re
 ## 6) Preparação de dados
 
 1. **Resample/align** OHLCV por símbolo e timeframe.
-2. **Alvos:** retornos log n-passos e/ou rótulos por barreiras (ver §8).
+2. **Alvos:** retornos log n-passos e/ou rótulos direcionais binários (ver §8).
 3. **Limpeza:** outliers por regras de rejeição simples (breaks, velas zero), remoção de velas parciais.
 4. **Normalização sem vazamento:** fit do scaler apenas no treino; **Standard/Robust/MinMax** conforme distribuição. ([ResearchGate][19])
 5. **Features derivadas** calculadas exclusivamente com dados disponíveis até t (ponto-no-tempo).
@@ -97,7 +97,7 @@ Aprender padrões de preço e microestrutura de criptoativos 24/7 para prever re
 ## 8) Definição de targets e rótulos
 
 * **Regressão:** prever retorno log em H passos à frente; estratégias multi-passo: recursiva, direta ou multi-saída. ([agorism.dev][10])
-* **Classificação (robusta a ruído):** **Triple Barrier** com take-profit/stop e barreira temporal, rótulos {+1, −1, 0}. Evita simplismo de “subiu/desceu” e captura risco. ([agorism.dev][22], [Blog de Finanças Quantitativas][23])
+* **Classificação (direcional + abstenção):** rótulo binário por retorno futuro com limiar $\theta$; decisão operacional via thresholds ($p>\tau_+$ compra; $p<\tau_-$ vende; caso contrário, neutro).
 
 ---
 
@@ -116,7 +116,7 @@ Aprender padrões de preço e microestrutura de criptoativos 24/7 para prever re
 ## 10) Validação e backtest
 
 * **Sem embaralhar no tempo.** Usar **rolling/rolling-origin** e/ou `TimeSeriesSplit`. ([python-binance.readthedocs.io][26], [Binance Developer Community][18])
-* **Financeiro (fase 2):** **Purged K-Fold + embargo** para eliminar contaminação entre treino/teste quando labels usam janelas sobrepostas. ([agorism.dev][22], [Blog de Finanças Quantitativas][27])
+* **Financeiro (fase 2):** **Purged K-Fold + embargo** para eliminar contaminação entre treino/teste quando janelas de features/targets se sobrepõem. ([Blog de Finanças Quantitativas][27])
 * **Comparação de modelos:** teste **Diebold-Mariano** no erro de previsão. ([Coin Metrics][9])
 
 ---
@@ -202,7 +202,7 @@ Aprender padrões de preço e microestrutura de criptoativos 24/7 para prever re
 * **MASE/sMAPE e avaliação de previsão:** ([otexts.com][1])
 * **F1/PR-AUC em classes desbalanceadas:** ([scikit-learn.org][5], [PLOS][6])
 * **DeepAR/NLL; quantis/pinball:** ([ScienceDirect][3], [josephsalmon.eu][4])
-* **Triple Barrier; práticas em finanças:** ([agorism.dev][22], [Blog de Finanças Quantitativas][23])
+* **Práticas em finanças (validação/embargo/thresholding):** ([Blog de Finanças Quantitativas][23])
 * **Order book imbalance:** ([arXiv][12], [NBER][13])
 * **On-chain (Active Addresses, NVT; API):** ([gitbook-docs.coinmetrics.io][15], [docs.coinmetrics.io][16])
 * **Otimizador Adam; Optuna:** ([arXiv][28], [optuna.readthedocs.io][29])

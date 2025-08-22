@@ -12,7 +12,7 @@
 
 ## 2) Objetivos e resultados
 
-* **O1. Classificação direcional** (janela de 5–60 min e 1–24 h): prever se o retorno futuro $r_{t+H}$ excede um limiar $\theta$ (positivo/negativo), usando *triple-barrier* para rótulos e controle de risco.
+* **O1. Classificação direcional** (janela de 5–60 min e 1–24 h): prever se o retorno futuro $r_{t+H}$ excede um limiar $\theta$ (positivo/negativo), com rótulo binário direcional e controle via threshold/abstenção.
 * **O2. Regressão de retorno/volatilidade:** estimar $r_{t+H}$ ou $\sigma_{t+H}$ (volatilidade realizada), com previsão pontual (MAE/RMSE) e **previsões quantílicas** (p10, p50, p90) para envelopes de risco.
 * **O3. Métricas econômicas**: Sharpe/Sortino após custos, *max drawdown*, *turnover*, *capacity*, significância (PSR/DSR).
 * **O4. Interpretabilidade**: explicações nível feature e interação com TreeSHAP; validação de estabilidade ao longo do tempo.
@@ -74,9 +74,9 @@
 
 ## 7) Definição de rótulos (labeling)
 
-* **Triple-Barrier**: superior/inferior por ATR ou múltiplos de volatilidade; **timeout** = horizonte **H**. Rótulos: +1, −1, 0.
-* **Direcional simples**: $\operatorname{sign}(r_{t\rightarrow t+H} - \theta)$. $\theta$ pequeno > 0 para evitar *micro-noise*.
-* **Meta-labeling**: classificar quando *entry rule* externa tem *edge*; rótulos base nos eventos do sinal primário.
+* **Direcional binário**: $\operatorname{sign}(r_{t\rightarrow t+H} - \theta) \in \{+1,-1\}$; mapear para {1,0}. $\theta$ pequeno > 0 para evitar *micro-noise*.
+* **Abstenção por threshold**: operar apenas quando $p(y=1) > \tau_+$ ou $< \tau_-$; zona morta $[\tau_-,\tau_+]$ substitui o neutro.
+* **Meta-labeling (opcional)**: classificar quando *entry rule* externa tem *edge*.
 * **Regressão**: alvo $r_{t+H}$ ou $\sigma_{t+H}$; **quantis** τ ∈ {0.1, 0.5, 0.9}.
 
 **Pesos de amostra:** decaimento temporal e ajuste por **unicidade** quando eventos se sobrepõem (sinais independentes recebem maior peso).
@@ -123,7 +123,7 @@
 
 1. **Ingestão e *cleaning***: consolidar fontes; checagens de integridade; *resampling*; UTC; preenchimentos curtos.
 2. **Feature store**: gerar lags/janelas; microestrutura/derivativos/on-chain; diferenciação fracionária; salvar artefatos com *hash* e datas.
-3. **Labeling**: *triple-barrier* e variantes; pesos de unicidade e decaimento temporal.
+3. **Labeling**: rótulo direcional por retorno futuro com limiar $\theta$; pesos de unicidade e decaimento temporal.
 4. **Split**: walk-forward purgado + embargo.
 5. **Busca de *hparams***: *Bayesian/Optuna* com orçamentos diferentes por horizonte; *early stopping* e *pruning* por *overfitting*.
 6. **Treino**: XGBoost com *callbacks* de log; checagem de importância (gain, cover) para poda de *features* redundantes.
@@ -181,7 +181,7 @@
 
 ## 15) Especificações técnicas
 
-**Linguagem/stack.** Python 3.10+, XGBoost 2.x/3.x (`hist`/`gpu_hist`), pandas/polars, NumPy, scikit-learn, Optuna, SHAP (TreeExplainer), mlfinlab (para *triple-barrier* e utilidades), *pyfolio*/*empyrical* para métricas.
+**Linguagem/stack.** Python 3.10+, XGBoost 2.x/3.x (`hist`/`gpu_hist`), pandas/polars, NumPy, scikit-learn, Optuna, SHAP (TreeExplainer), mlfinlab (utilidades de validação), *pyfolio*/*empyrical* para métricas.
 
 **Escalabilidade.** Para dados grandes, `QuantileDMatrix` e *external memory*; `gpu_hist` quando GPU disponível. *Pipelines* orquestrados (Airflow/Prefect) e *feature store* versionada.
 
@@ -203,8 +203,10 @@ X = make_features(df, lags=[1,3,5,10,20], windows=[5,15,60,240,1440],
                   onchain=['active_addr','nvt','fees'],
                   transforms=['fracdiff','winsorize'])
 
-# 3) Labeling (triple barrier)
-y, w = triple_barrier_labels(returns, pt=2*atr, sl=1.5*atr, t1=H, weights='uniqueness_time_decay')
+# 3) Labeling (direcional com threshold)
+ret_fut = compute_future_return(df, horizon=H)
+y = (ret_fut > theta).astype(int)
+w = time_decay_weights(df.index)  # opcional
 
 # 4) Purged walk-forward splits
 for trn, val in purged_cv_blocks(X.index, H, embargo=H):
@@ -264,7 +266,7 @@ def quantile_objective(q):
 
 ## 20) Roadmap
 
-* **S1 (2 semanas):** ingestão, *feature store* e labeling com *triple-barrier*; *purged CV*; *baseline* XGB classificação (H=1h).
+* **S1 (2 semanas):** ingestão, *feature store* e labeling direcional; *purged CV*; *baseline* XGB classificação (H=1h).
 * **S2 (2 semanas):** regressão e quantis; calibração; backtest e custos; relatório.
 * **S3 (2 semanas):** LOB/derivativos/on-chain; SHAP e estabilidade; *hardening* e *model card*.
 
@@ -272,4 +274,4 @@ def quantile_objective(q):
 
 ### Resumo do que “deu certo” para replicar
 
-1. **Lags + janelas** para converter série em tabular e **walk-forward**; 2) **OFI/imbalance** e realizadas de alta frequência quando disponíveis; 3) **derivativos** (funding/OI/basis) e **on-chain** como *alpha* adicionais; 4) **triple-barrier**, **purged CV + embargo**, **calibração** de probabilidades e *threshold tuning* orientado a F1/PR-AUC; 5) **TreeSHAP** para seleção/estabilidade de *features* e controle de deriva; 6) **PSR/DSR** e custos no backtest para separar sorte de *edge* real.
+1. **Lags + janelas** para converter série em tabular e **walk-forward**; 2) **OFI/imbalance** e realizadas de alta frequência quando disponíveis; 3) **derivativos** (funding/OI/basis) e **on-chain** como *alpha* adicionais; 4) **purged CV + embargo**, **calibração** de probabilidades e *threshold tuning* orientado a F1/PR-AUC/EV; 5) **TreeSHAP** para seleção/estabilidade de *features* e controle de deriva; 6) **PSR/DSR** e custos no backtest para separar sorte de *edge* real.
