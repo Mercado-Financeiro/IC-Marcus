@@ -111,7 +111,7 @@ class XGBoostOptuna:
             'tree_method': 'hist',
             'objective': 'binary:logistic',
             'eval_metric': 'auc',
-            'random_state': self.seed,
+            'random_state': self.seed + trial.number,  # Different seed per trial for diversity
             'verbosity': 0,
             'n_jobs': -1
         }
@@ -239,7 +239,7 @@ class XGBoostOptuna:
                 
                 model = xgb.XGBClassifier(**params_with_early_stopping)
                 
-                # Fit model
+                # Fit model with proper eval_set
                 model.fit(
                     X_train, y_train,
                     sample_weight=w_train,
@@ -247,14 +247,9 @@ class XGBoostOptuna:
                     verbose=False
                 )
                 
-                # Calibration (mandatory)
-                calibrator = CalibratedClassifierCV(
-                    model, method='isotonic', cv='prefit'
-                )
-                calibrator.fit(X_val, y_val)
-                
-                # Predict with calibrated model
-                y_pred_proba = calibrator.predict_proba(X_val)[:, 1]
+                # Skip calibration during optimization (only calibrate final model)
+                # This avoids overfitting on validation set
+                y_pred_proba = model.predict_proba(X_val)[:, 1]
                 
                 # Optimize threshold for F1
                 threshold = self._optimize_threshold_f1(y_val, y_pred_proba)
@@ -276,6 +271,15 @@ class XGBoostOptuna:
                 # Composite score (maximize)
                 score = 0.4 * f1 + 0.3 * pr_auc + 0.2 * mcc - 0.1 * brier
                 scores.append(score)
+                
+                # Log trial metrics for debugging
+                if fold_idx == 0:  # Log only first fold to avoid spam
+                    log.info(
+                        f"Trial {trial.number} Fold {fold_idx}: "
+                        f"f1={f1:.4f}, pr_auc={pr_auc:.4f}, "
+                        f"mcc={mcc:.4f}, brier={brier:.4f}, "
+                        f"score={score:.4f}"
+                    )
                 
                 # Report for pruning
                 trial.report(score, fold_idx)
@@ -386,7 +390,7 @@ class XGBoostOptuna:
             'tree_method': 'hist',
             'objective': 'binary:logistic',
             'eval_metric': 'auc',
-            'random_state': self.seed,
+            'random_state': self.seed,  # Fixed seed for final model
             'verbosity': 0,
             'n_jobs': -1
         })

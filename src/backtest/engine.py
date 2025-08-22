@@ -168,6 +168,38 @@ class BacktestEngine:
         
         return start <= hour_min < end
     
+    def generate_signals_with_thresholds(
+        self,
+        probas: np.ndarray,
+        threshold_long: float = 0.65,
+        threshold_short: float = 0.35,
+        mode: str = 'double'
+    ) -> np.ndarray:
+        """Generate trading signals with configurable thresholds.
+        
+        Args:
+            probas: Predicted probabilities (0 to 1)
+            threshold_long: Threshold for long positions
+            threshold_short: Threshold for short positions
+            mode: 'single' or 'double' threshold mode
+            
+        Returns:
+            Array of signals (-1, 0, 1)
+        """
+        signals = np.zeros_like(probas)
+        
+        if mode == 'double':
+            # Double threshold with neutral zone
+            signals[probas > threshold_long] = 1  # Long
+            signals[probas < threshold_short] = -1  # Short
+            # Between thresholds = 0 (neutral/flat)
+        else:
+            # Single threshold (binary)
+            signals[probas > threshold_long] = 1
+            signals[probas <= threshold_long] = -1
+            
+        return signals.astype(int)
+    
     def run_backtest(self, data: pd.DataFrame, signals: pd.Series) -> pd.DataFrame:
         """Run backtest with t+1 execution.
         
@@ -382,6 +414,69 @@ class BacktestEngine:
         }
         
         return metrics
+    
+    def optimize_thresholds_for_ev(
+        self,
+        data: pd.DataFrame,
+        probas: np.ndarray,
+        threshold_range: Tuple[float, float] = (0.2, 0.8),
+        step: float = 0.05,
+        min_gap: float = 0.2
+    ) -> Dict:
+        """Optimize thresholds to maximize expected value.
+        
+        Args:
+            data: OHLCV data
+            probas: Predicted probabilities
+            threshold_range: Range for threshold search
+            step: Step size for grid search
+            min_gap: Minimum gap between short and long thresholds
+            
+        Returns:
+            Dict with optimal thresholds and metrics
+        """
+        best_ev = -np.inf
+        best_thresholds = {'long': 0.65, 'short': 0.35}
+        best_metrics = {}
+        
+        # Grid search for optimal thresholds
+        short_range = np.arange(threshold_range[0], threshold_range[1] - min_gap, step)
+        
+        for th_short in short_range:
+            long_range = np.arange(th_short + min_gap, threshold_range[1] + step, step)
+            
+            for th_long in long_range:
+                # Generate signals with current thresholds
+                signals = self.generate_signals_with_thresholds(
+                    probas, th_long, th_short, mode='double'
+                )
+                
+                # Run backtest
+                results = self.run_backtest(data, pd.Series(signals, index=data.index))
+                metrics = self.calculate_metrics(results)
+                
+                # Calculate expected value (net return adjusted for risk)
+                ev = metrics['annualized_return'] - 0.5 * metrics['volatility']**2
+                
+                # Penalize for excessive trading
+                ev -= 0.01 * metrics['turnover']
+                
+                # Bonus for good Sharpe
+                if metrics['sharpe_ratio'] > 1.0:
+                    ev *= 1.1
+                
+                if ev > best_ev:
+                    best_ev = ev
+                    best_thresholds = {'long': th_long, 'short': th_short}
+                    best_metrics = metrics
+                    best_metrics['expected_value'] = ev
+                    best_metrics['abstention_rate'] = (signals == 0).mean()
+        
+        return {
+            'thresholds': best_thresholds,
+            'metrics': best_metrics,
+            'expected_value': best_ev
+        }
     
     def calculate_dsr(self, sharpe: float, n_trials: int, T: int) -> float:
         """Calculate Deflated Sharpe Ratio.

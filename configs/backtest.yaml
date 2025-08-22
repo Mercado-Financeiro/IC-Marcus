@@ -182,12 +182,46 @@ performance:
   validate_signals: true
   validate_prices: true
   
+# Configurações de Threshold (NOVO - Binária + Threshold)
+thresholds:
+  # Modo de threshold: single (binário simples) ou double (com zona neutra)
+  mode: "double"              # single, double
+  
+  # Otimização automática
+  optimize:
+    enabled: true
+    method: "expected_value"  # expected_value, f1_score, pr_auc, sharpe_ratio
+    
+    # Range de busca
+    search_range:
+      min: 0.20               # Mínimo threshold
+      max: 0.80               # Máximo threshold
+      step: 0.05              # Passo do grid search
+      
+    # Constraints para double threshold
+    min_gap: 0.20             # Gap mínimo entre short e long thresholds
+    max_abstention: 0.50     # Máximo de abstenção permitido
+    
+  # Valores default (usados se otimização desabilitada)
+  defaults:
+    single_threshold: 0.50    # Para modo single
+    long_threshold: 0.65      # Para modo double
+    short_threshold: 0.35     # Para modo double
+    
+  # Ajuste dinâmico (experimental)
+  dynamic:
+    enabled: false
+    method: "regime_based"    # regime_based, rolling_window
+    update_frequency: "daily" # daily, weekly, monthly
+    lookback_window: 30       # Dias para recalcular
+
 # Métricas target para validação
 targets:
   sharpe_ratio_min: 1.0       # Sharpe > 1.0
   max_drawdown_max: -0.20     # MDD < 20%
   win_rate_min: 0.45          # Win rate > 45%
   total_return_min: 0.10      # Return > 10% anual
+  abstention_rate_max: 0.40  # Máximo 40% de abstenção
   
 # Configurações específicas para diferentes tipos de ativo
 asset_specific:

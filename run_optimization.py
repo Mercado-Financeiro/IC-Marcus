@@ -86,7 +86,7 @@ class OptimizationPipeline:
         data_config = configs.get('data', {})
         mlflow.set_tracking_uri("artifacts/mlruns")
         mlflow.set_experiment("crypto_ml_production")
-        
+
         # Parâmetros padrão derivados das configs
         # Embargo: preferir de xgb.cv, senão de data.split.purged_kfold
         self.embargo = (
@@ -179,12 +179,12 @@ class OptimizationPipeline:
                 total_samples = len(df)
                 neutral_count = original_distribution.get(0, 0)
                 neutral_pct = (neutral_count / total_samples * 100) if total_samples > 0 else 0
-                
+
                 print(f"\n📊 Triple Barrier Label Distribution:")
                 print(f"  • Short (-1): {original_distribution.get(-1, 0)} ({original_distribution.get(-1, 0)/total_samples*100:.1f}%)")
                 print(f"  • Neutral (0): {neutral_count} ({neutral_pct:.1f}%)")
                 print(f"  • Long (1): {original_distribution.get(1, 0)} ({original_distribution.get(1, 0)/total_samples*100:.1f}%)")
-                
+
                 # Remover neutros (0) para classificação binária e mapear {-1,1} -> {0,1}
                 # DECISÃO: Usar binária + threshold para melhor calibração e generalização
                 non_neutral_mask = df['label'] != 0
@@ -192,10 +192,10 @@ class OptimizationPipeline:
                     if not isinstance(sample_weights, pd.Series):
                         sample_weights = pd.Series(sample_weights, index=df.index)
                     sample_weights = sample_weights.loc[non_neutral_mask]
-                
+
                 df = df.loc[non_neutral_mask].copy()
                 df['label'] = (df['label'] == 1).astype(int)
-                
+
                 print(f"  ➤ Filtered {neutral_count} neutral labels ({neutral_pct:.1f}%)")
                 print(f"  ➤ Binary classification: {len(df)} samples remaining")
 
@@ -433,20 +433,20 @@ class OptimizationPipeline:
         # Se temos probabilidades, otimizar thresholds
         if y_pred_proba is not None:
             print("🎯 Otimizando thresholds para maximizar EV...")
-            
+
             # Otimizar thresholds
             optimization_result = bt.optimize_thresholds_for_ev(
-                bt_df, 
+                bt_df,
                 y_pred_proba[:, 1] if len(y_pred_proba.shape) > 1 else y_pred_proba,
                 threshold_range=(0.25, 0.75),
                 step=0.05,
                 min_gap=0.2
             )
-            
+
             optimal_thresholds = optimization_result['thresholds']
             print(f"  • Long Threshold: {optimal_thresholds['long']:.3f}")
             print(f"  • Short Threshold: {optimal_thresholds['short']:.3f}")
-            
+
             # Gerar sinais com thresholds otimizados
             probas = y_pred_proba[:, 1] if len(y_pred_proba.shape) > 1 else y_pred_proba
             signals = bt.generate_signals_with_thresholds(
@@ -456,7 +456,7 @@ class OptimizationPipeline:
                 mode='double'
             )
             signals = pd.Series(signals, index=X_test.index)
-            
+
             # Usar métricas da otimização
             metrics = optimization_result['metrics']
             print(f"  • Abstention Rate: {metrics.get('abstention_rate', 0):.1%}")

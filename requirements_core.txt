@@ -1,0 +1,14 @@
+mlflow==3.3.1
+mlflow-skinny==3.3.1
+mlflow-tracing==3.3.1
+mypy_extensions==1.1.0
+numpy==1.26.4
+optuna==4.4.0
+pandas==2.3.1
+plotly==6.3.0
+pytest==7.4.4
+PyYAML==6.0.1
+scikit-learn==1.7.1
+streamlit==1.48.1
+torch==2.8.0
+xgboost==3.0.4

@@ -1,113 +1,182 @@
-# Makefile para ML Finance Crypto Project
+# Makefile para Projeto ML Trading de Criptomoedas
+# Configurações e comandos padronizados
 
-.PHONY: help install fmt type test deterministic train backtest dash clean
+PYTHON = python3
+SYMBOL = BTCUSDT
+TIMEFRAME = 15m
 
-# Cores para output
-RED := \033[0;31m
-GREEN := \033[0;32m
-YELLOW := \033[0;33m
-NC := \033[0m # No Color
+# Instalação e Setup
+.PHONY: install setup deterministic
 
-help: ## Mostra este help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "$(GREEN)%-20s$(NC) %s\n", $$1, $$2}'
+setup:
+	@echo "🔧 Configurando ambiente..."
+	mkdir -p artifacts/models artifacts/reports data/raw data/processed
+	@echo "✅ Estrutura de diretórios criada"
 
-install: ## Instala dependências e configura ambiente
-	@echo "$(YELLOW)📦 Instalando dependências...$(NC)"
-	pip install -U pip setuptools wheel
-	pip install -e .[dev]
-	pre-commit install
-	@echo "$(GREEN)✅ Instalação completa!$(NC)"
+deterministic:
+	@echo "🎯 Configurando determinismo..."
+	@$(PYTHON) -c "\
+import os, random, numpy as np; \
+try: \
+    import torch; \
+    torch.use_deterministic_algorithms(True); \
+    torch.backends.cudnn.deterministic = True; \
+    torch.backends.cudnn.benchmark = False; \
+    print('✅ Torch configurado para determinismo'); \
+except Exception: \
+    print('⚠️ Torch não disponível'); \
+os.environ.update({ \
+    'PYTHONHASHSEED': '0', \
+    'CUBLAS_WORKSPACE_CONFIG': ':4096:8', \
+    'CUDA_LAUNCH_BLOCKING': '1' \
+}); \
+random.seed(42); \
+np.random.seed(42); \
+print('✅ Determinismo configurado (SEED=42)')"
 
-fmt: ## Formata código com ruff e black
-	@echo "$(YELLOW)🎨 Formatando código...$(NC)"
-	ruff check --fix src tests
-	black src tests
-	ruff format src tests
-	@echo "$(GREEN)✅ Código formatado!$(NC)"
+# Execução de Modelos
+.PHONY: train-xgb train-lstm train-both quick-test
 
-type: ## Verifica tipos com mypy
-	@echo "$(YELLOW)🔍 Verificando tipos...$(NC)"
-	mypy src
-	@echo "$(GREEN)✅ Tipos verificados!$(NC)"
+train-xgb:
+	@echo "🎯 Treinando XGBoost com $(SYMBOL) $(TIMEFRAME)..."
+	$(PYTHON) run_optimization.py --model xgboost --symbol $(SYMBOL) --timeframe $(TIMEFRAME)
 
-test: ## Roda testes com pytest
-	@echo "$(YELLOW)🧪 Rodando testes...$(NC)"
-	pytest -q tests/
-	@echo "$(GREEN)✅ Testes passaram!$(NC)"
+train-lstm:
+	@echo "🧠 Treinando LSTM com $(SYMBOL) $(TIMEFRAME)..."
+	$(PYTHON) run_optimization.py --model lstm --symbol $(SYMBOL) --timeframe $(TIMEFRAME)
 
-deterministic: ## Configura ambiente determinístico
-	@echo "$(YELLOW)🎲 Configurando determinismo...$(NC)"
-	@python - <<'PY'
-	import os, random, numpy as np
-	try:
-	    import torch
-	    torch.use_deterministic_algorithms(True)
-	    torch.backends.cudnn.deterministic = True
-	    torch.backends.cudnn.benchmark = False
-	    print("✅ Torch configurado")
-	except Exception:
-	    print("⚠️ Torch não disponível")
-	os.environ.update({
-	    "PYTHONHASHSEED": "0",
-	    "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
-	    "CUDA_LAUNCH_BLOCKING": "1",
-	})
-	random.seed(42)
-	np.random.seed(42)
-	print("✅ Determinismo configurado!")
-	PY
+train-both:
+	@echo "🚀 Treinando XGBoost e LSTM com $(SYMBOL) $(TIMEFRAME)..."
+	$(PYTHON) run_optimization.py --model both --symbol $(SYMBOL) --timeframe $(TIMEFRAME)
 
-train: ## Treina modelo (MODEL=xgb|lstm)
-	@echo "$(YELLOW)🚀 Treinando modelo $(MODEL)...$(NC)"
-	python -m src.models.$(MODEL) --config configs/$(MODEL).yaml
+quick-test:
+	@echo "⚡ Teste rápido com XGBoost..."
+	$(PYTHON) run_optimization.py --quick --model xgboost --symbol $(SYMBOL) --timeframe $(TIMEFRAME)
 
-backtest: ## Roda backtest
-	@echo "$(YELLOW)💰 Executando backtest...$(NC)"
-	python -m src.backtest.engine --config configs/backtest.yaml
+# Dashboard e Visualização
+.PHONY: dashboard mlflow-ui
 
-dash: ## Inicia dashboard Streamlit
-	@echo "$(YELLOW)📊 Iniciando dashboard...$(NC)"
-	streamlit run src/dashboard/app.py --server.port $${DASHBOARD_PORT:-8501}
+dashboard:
+	@echo "📊 Iniciando dashboard Streamlit..."
+	streamlit run src/dashboard/app.py --server.port 8501
 
-notebook: ## Abre Jupyter Lab com o notebook principal
-	@echo "$(YELLOW)📓 Abrindo Jupyter Lab...$(NC)"
-	jupyter lab notebooks/IC_Crypto_Complete.ipynb
+mlflow-ui:
+	@echo "📈 Iniciando MLflow UI..."
+	mlflow ui --backend-store-uri artifacts/mlruns --port 5000
 
-sync: ## Sincroniza notebooks com Jupytext
-	@echo "$(YELLOW)🔄 Sincronizando notebooks...$(NC)"
-	jupytext --sync notebooks/*.ipynb
-	@echo "$(GREEN)✅ Notebooks sincronizados!$(NC)"
+# Segurança e Qualidade
+.PHONY: security-audit detect-secrets validate-all pre-commit-run
 
-audit: ## Auditoria de segurança
-	@echo "$(YELLOW)🔒 Auditando segurança...$(NC)"
-	pip-audit -r requirements.txt --strict || true
-	bandit -r src/ || true
-	gitleaks detect --no-git --redact || true
-	@echo "$(GREEN)✅ Auditoria completa!$(NC)"
+security-audit:
+	@echo "🛡️ Executando auditoria completa de segurança..."
+	$(PYTHON) scripts/security_audit.py
 
-clean: ## Limpa arquivos temporários
-	@echo "$(YELLOW)🧹 Limpando arquivos temporários...$(NC)"
-	find . -type f -name "*.pyc" -delete
-	find . -type d -name "__pycache__" -delete
-	find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name ".mypy_cache" -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name ".ruff_cache" -exec rm -rf {} + 2>/dev/null || true
-	find . -type f -name ".coverage" -delete
-	find . -type f -name "temp_*.csv" -delete
-	find . -type f -name "temp_*.pkl" -delete
-	@echo "$(GREEN)✅ Limpeza completa!$(NC)"
+detect-secrets:
+	@echo "🔐 Detectando segredos no código..."
+	$(PYTHON) scripts/detect_secrets.py src/
 
-# Comandos compostos
-check: fmt type test ## Roda formatação, tipos e testes
-	@echo "$(GREEN)✅ Todas as verificações passaram!$(NC)"
+validate-all:
+	@echo "✅ Executando todas as validações..."
+	@$(MAKE) deterministic
+	@$(MAKE) security-audit
+	@$(MAKE) detect-secrets
+	@echo "🎉 Todas as validações passaram!"
 
-setup: install deterministic ## Setup completo do projeto
-	@echo "$(GREEN)✅ Projeto configurado e pronto!$(NC)"
+pre-commit-run:
+	@echo "🔧 Executando pre-commit hooks..."
+	pre-commit run --all-files
 
-all: setup check ## Setup e verificações completas
-	@echo "$(GREEN)🎉 Projeto totalmente configurado e verificado!$(NC)"
+# MLOps e Model Registry
+.PHONY: test-model-registry promote-model rollback-model
 
-# Variáveis de ambiente default
-export PYTHONPATH := $(shell pwd)
-export MLFLOW_TRACKING_URI := artifacts/mlruns
-export DASHBOARD_PORT ?= 8501
+test-model-registry:
+	@echo "🏆 Testando Model Registry..."
+	$(PYTHON) scripts/test_model_registry.py
+
+promote-model:
+	@if [ -z "$(MODEL_NAME)" ] || [ -z "$(VERSION)" ]; then \
+		echo "❌ Especifique MODEL_NAME e VERSION"; \
+		echo "Uso: make promote-model MODEL_NAME=crypto_xgb VERSION=1"; \
+		exit 1; \
+	fi
+	@echo "🚀 Promovendo modelo $(MODEL_NAME) versão $(VERSION)..."
+	$(PYTHON) -c "\
+from src.mlops.model_registry import get_model_registry; \
+registry = get_model_registry(); \
+result = registry.promote_to_production('$(MODEL_NAME)', '$(VERSION)'); \
+print('✅ Promoção bem-sucedida!' if result else '❌ Falha na promoção')"
+
+rollback-model:
+	@if [ -z "$(MODEL_NAME)" ]; then \
+		echo "❌ Especifique MODEL_NAME"; \
+		echo "Uso: make rollback-model MODEL_NAME=crypto_xgb"; \
+		exit 1; \
+	fi
+	@echo "⏪ Executando rollback do modelo $(MODEL_NAME)..."
+	$(PYTHON) -c "\
+from src.mlops.model_registry import get_model_registry; \
+registry = get_model_registry(); \
+result = registry.rollback_to_previous_champion('$(MODEL_NAME)'); \
+print('✅ Rollback bem-sucedido!' if result else '❌ Falha no rollback')"
+
+# Comandos informativos
+.PHONY: help status
+
+help:
+	@echo "🚀 Projeto ML Trading de Criptomoedas - Sistema Completo"
+	@echo ""
+	@echo "📦 Setup:"
+	@echo "  make setup          - Configurar ambiente"
+	@echo "  make deterministic  - Configurar determinismo"
+	@echo ""
+	@echo "🎯 Treinamento:"
+	@echo "  make train-xgb      - Treinar XGBoost"
+	@echo "  make train-lstm     - Treinar LSTM"
+	@echo "  make train-both     - Treinar ambos modelos"
+	@echo "  make quick-test     - Teste rápido"
+	@echo ""
+	@echo "📊 Visualização:"
+	@echo "  make dashboard      - Dashboard Streamlit"
+	@echo "  make mlflow-ui      - MLflow UI"
+	@echo ""
+	@echo "🛡️ Segurança e Qualidade:"
+	@echo "  make security-audit - Auditoria completa de segurança"
+	@echo "  make detect-secrets - Detectar segredos no código"
+	@echo "  make validate-all   - Executar todas as validações"
+	@echo "  make pre-commit-run - Executar pre-commit hooks"
+	@echo ""
+	@echo "🏆 MLOps:"
+	@echo "  make test-model-registry                    - Testar Model Registry"
+	@echo "  make promote-model MODEL_NAME=x VERSION=y   - Promover modelo"
+	@echo "  make rollback-model MODEL_NAME=x            - Rollback de modelo"
+	@echo ""
+	@echo "💡 Exemplos:"
+	@echo "  make train-xgb SYMBOL=ETHUSDT TIMEFRAME=1h"
+	@echo "  make quick-test SYMBOL=ADAUSDT"
+	@echo "  make promote-model MODEL_NAME=crypto_xgb VERSION=1"
+	@echo "  make security-audit"
+
+status:
+	@echo "📊 Status do Projeto - Sistema ML Trading"
+	@echo "=========================================="
+	@echo "Configurações YAML:"
+	@ls -la configs/*.yaml 2>/dev/null | wc -l | xargs -I {} echo "  ✅ Configs: {} arquivos"
+	@echo ""
+	@echo "Dados:"
+	@ls -la data/raw/ 2>/dev/null | wc -l | xargs -I {} echo "  📁 Raw: {} arquivos"
+	@ls -la data/processed/ 2>/dev/null | wc -l | xargs -I {} echo "  📁 Processed: {} arquivos"
+	@echo ""
+	@echo "Modelos e MLflow:"
+	@ls -la artifacts/models/ 2>/dev/null | wc -l | xargs -I {} echo "  🤖 Modelos salvos: {} arquivos"
+	@ls -la artifacts/mlruns/*/*/ 2>/dev/null | wc -l | xargs -I {} echo "  📊 MLflow runs: {} experimentos"
+	@echo ""
+	@echo "Segurança:"
+	@if [ -f .pre-commit-config.yaml ]; then echo "  ✅ Pre-commit configurado"; else echo "  ❌ Pre-commit não configurado"; fi
+	@if [ -f requirements.txt ]; then echo "  ✅ Requirements.txt presente"; else echo "  ❌ Requirements.txt ausente"; fi
+	@if [ -f .secrets.baseline ]; then echo "  ✅ Secrets baseline criado"; else echo "  ❌ Secrets baseline ausente"; fi
+	@echo ""
+	@echo "Scripts:"
+	@ls -la scripts/*.py 2>/dev/null | wc -l | xargs -I {} echo "  🔧 Scripts: {} utilitários"
+
+# Comando padrão
+.DEFAULT_GOAL := help
