@@ -154,8 +154,8 @@ class XGBoostOptuna:
             'eval_metric': 'aucpr',  # Better for imbalanced data
             'random_state': self.seed,
             'verbosity': 0,  # Reduce noise
-            'n_jobs': -1,
-            'early_stopping_rounds': 50  # Menos paciência para detectar não-aprendizado
+            'n_jobs': -1
+            # early_stopping_rounds removed - will be passed in fit method
         }
         
         return params
@@ -274,25 +274,28 @@ class XGBoostOptuna:
                 X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
                 y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
                 
-                # Sample weights
+                # Sample weights - ensure proper alignment
                 if sample_weights is not None:
-                    w_train = sample_weights[train_idx]
+                    if isinstance(sample_weights, pd.Series):
+                        w_train = sample_weights.iloc[train_idx].values
+                    else:
+                        w_train = sample_weights[train_idx]
                 else:
                     w_train = None
                 
-                # Create model with early stopping (XGBoost 3.x API)
+                # Create model WITHOUT early_stopping in constructor
                 model = xgb.XGBClassifier(**params)
                 
-                # Fit model with eval_set (early stopping handled by constructor)
+                # Fit model with early_stopping in fit method
                 model.fit(
                     X_train, y_train,
                     sample_weight=w_train,
                     eval_set=[(X_val, y_val)],
+                    early_stopping_rounds=50,
                     verbose=False
                 )
                 
-                # Skip calibration during optimization (only calibrate final model)
-                # This avoids overfitting on validation set
+                # Get predictions
                 y_pred_proba = model.predict_proba(X_val)[:, 1]
                 
                 # Check if predictions are constant (indicates model not learning)
@@ -466,39 +469,19 @@ class XGBoostOptuna:
             'eval_metric': 'aucpr',  # Consistent with optimization
             'random_state': self.seed,
             'verbosity': 0,
-            'n_jobs': -1,
-            'early_stopping_rounds': 100  # Same early stopping as optimization
+            'n_jobs': -1
         })
         
         # Use consistent scale_pos_weight calculation
         params['scale_pos_weight'] = self._calculate_scale_pos_weight(y)
         
-        # Train model with validation split for early stopping
-        from sklearn.model_selection import train_test_split
-        if len(X) > 100:  # Only split if we have enough data
-            X_train, X_val, y_train, y_val = train_test_split(
-                X, y, test_size=0.2, shuffle=False, stratify=None
-            )
-            model = xgb.XGBClassifier(**params)
-            model.fit(
-                X_train, y_train, 
-                sample_weight=sample_weights[:len(X_train)] if sample_weights is not None else None,
-                eval_set=[(X_val, y_val)],
-                verbose=False
-            )
-        else:
-            # Small dataset, train on all data without early stopping
-            params_no_early_stop = {k: v for k, v in params.items() if k != 'early_stopping_rounds'}
-            model = xgb.XGBClassifier(**params_no_early_stop)
-            model.fit(X, y, sample_weight=sample_weights, verbose=False)
+        # Train model on all data (no early stopping for final model)
+        model = xgb.XGBClassifier(**params)
+        model.fit(X, y, sample_weight=sample_weights, verbose=False)
         
-        # Calibrate (mandatory) - use base model without early stopping for calibration
-        base_model_params = {k: v for k, v in params.items() if k != 'early_stopping_rounds'}
-        base_model = xgb.XGBClassifier(**base_model_params)
-        base_model.fit(X, y, sample_weight=sample_weights, verbose=False)
-        
+        # Calibrate (mandatory)
         self.calibrator = CalibratedClassifierCV(
-            base_model, method='isotonic', cv=3
+            model, method='isotonic', cv=3
         )
         self.calibrator.fit(X, y)
         
