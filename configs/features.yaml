@@ -1,0 +1,162 @@
+# configs/features.yaml - Configurações de Features
+# Integração completa de todas as features implementadas
+
+# Configurações básicas
+seed: 42
+
+# Features de preço e retornos
+price_features:
+  lookback_periods: [5, 10, 20, 50, 100, 200]
+  include_momentum: true
+  include_zscore: true
+  include_sma_ratio: true
+
+# Features de volatilidade avançadas
+volatility_features:
+  lookback_periods: [5, 10, 20, 50, 100, 200]
+  
+  # Estimadores avançados do notebook
+  advanced_estimators:
+    enabled: true
+    estimators: ['atr', 'garman_klass', 'yang_zhang', 'parkinson', 'realized']
+    
+  # Features tradicionais
+  historical_volatility: true
+  volatility_ratios: true
+  volatility_percentiles: true
+  volatility_regimes: true
+
+# Indicadores técnicos
+technical_indicators:
+  enabled: true
+  indicators: ["rsi", "macd", "bbands", "atr", "obv", "adx", "cci", "stoch"]
+  
+  # Parâmetros específicos
+  rsi_periods: [14, 21]
+  macd_params:
+    fast: 12
+    slow: 26
+    signal: 9
+  bb_period: 20
+  bb_std: 2
+
+# Features de microestrutura
+microstructure_features:
+  enabled: true
+  include_basic: true
+  include_advanced: false  # Requer dados de order book
+  
+  # Features básicas de volume/spread
+  volume_features: true
+  spread_features: true
+  liquidity_proxies: true
+
+# Features de calendário e sessões 24x7
+calendar_features:
+  enabled: true
+  include_crypto_features: true  # Features específicas para crypto
+  
+  # Features básicas de tempo
+  time_components: true
+  cyclical_encoding: true
+  special_periods: true
+  
+  # Features específicas para crypto 24x7
+  crypto_24x7:
+    enabled: true
+    
+    # Sessões regionais
+    trading_sessions: true
+    session_overlaps: true
+    
+    # Funding features
+    funding_features: true
+    funding_period_minutes: 480  # 8 horas padrão
+    funding_proximity: true
+    funding_cycles: true
+
+# Adaptive labeling integration
+adaptive_labeling:
+  enabled: true
+  vol_estimator: "yang_zhang"
+  horizons: ['15m', '30m', '60m', '120m']
+  k_optimization: true
+  neutral_zone: true
+  
+  # Funding-aware features
+  funding_aware: true
+  funding_periods:
+    BTCUSDT: 480  # 8 horas
+    ETHUSDT: 480
+    # Adicionar outros símbolos conforme necessário
+
+# Feature engineering pipeline
+pipeline:
+  # Ordem de processamento (importante para dependências)
+  processing_order:
+    1: "price_features"
+    2: "volatility_features" 
+    3: "technical_indicators"
+    4: "microstructure_features"
+    5: "calendar_features"
+    6: "adaptive_labeling"
+  
+  # Normalização/escalonamento
+  scaling:
+    enabled: false  # XGBoost não precisa, LSTM tem próprio scaler
+    method: "robust"  # "standard", "robust", "minmax"
+    
+  # Limpeza de dados
+  data_cleaning:
+    remove_outliers: false  # Manter dados originais
+    fill_na_method: "forward"  # Forward fill para séries temporais
+    max_na_ratio: 0.1  # Máximo 10% de NAs por feature
+  
+  # Seleção de features
+  feature_selection:
+    enabled: false  # Deixar modelos decidirem
+    method: "mutual_info"  # "mutual_info", "f_score", "rfe"
+    max_features: 100
+
+# Features específicas por horizonte
+horizon_specific:
+  enabled: true
+  
+  # Features dependentes de horizonte
+  adaptive_volatility: true
+  adaptive_thresholds: true
+  
+  # Horizontes suportados
+  supported_horizons: ['15m', '30m', '60m', '120m', '240m']
+
+# Validação de features
+validation:
+  enabled: true
+  
+  # Verificações automáticas
+  check_infinite: true
+  check_constant: true
+  check_high_correlation: true
+  correlation_threshold: 0.95
+  
+  # Logging de estatísticas
+  log_statistics: true
+  log_distributions: false  # Pode ser verbose
+
+# Otimização de memória
+memory_optimization:
+  enabled: true
+  
+  # Usar tipos eficientes
+  use_float32: true
+  use_categorical: true
+  
+  # Limpeza de memória intermediária
+  cleanup_intermediate: true
+  
+# Debugging e desenvolvimento
+debug:
+  enabled: false
+  save_intermediate: false
+  log_feature_importance: true
+  plot_distributions: false

@@ -1,0 +1,150 @@
+# configs/multi_horizon.yaml - Pipeline Multi-Horizonte
+# Configuração para treino em múltiplos horizontes temporais
+
+# Configurações básicas
+seed: 42
+deterministic: true
+
+# Símbolo e mercado
+market:
+  symbol: "BTCUSDT"
+  timeframe: "15m"
+  funding_period_minutes: 480  # 8 horas para BTCUSDT
+
+# Horizontes a processar
+horizons:
+  enabled: ['15m', '30m', '60m', '120m']  # Horizontes ativos
+  
+  # Mapeamento para barras (15min base)
+  horizon_map:
+    '15m': 1    # 15 minutos = 1 barra
+    '30m': 2    # 30 minutos = 2 barras
+    '60m': 4    # 60 minutos = 4 barras
+    '120m': 8   # 120 minutos = 8 barras
+    '240m': 16  # 240 minutos = 16 barras
+
+# Divisão dos dados
+data_splits:
+  test_size: 0.2    # 20% para teste
+  val_size: 0.2     # 20% para validação
+  
+  # Splits temporais (sem vazamento)
+  method: "temporal"
+  shuffle: false
+  
+# Features
+features:
+  # Usar features avançadas
+  use_enhanced_volatility: true
+  use_crypto_24x7: true
+  use_adaptive_labeling: true
+  
+  # Funding-aware features
+  funding_features:
+    enabled: true
+    proximity_decay: 10  # Decaimento exponencial
+    pre_funding_window: 60  # minutos antes do funding
+    
+# Labeling adaptativo
+adaptive_labeling:
+  vol_estimator: "yang_zhang"  # Melhor estimador
+  neutral_zone: true
+  k_optimization: true
+  k_range: [0.5, 2.0]
+  cv_splits: 3
+
+# Modelo (XGBoost)
+model:
+  type: "xgboost"
+  
+  # Otimização por horizonte
+  optimize_per_horizon: true
+  n_trials: 50  # Por horizonte
+  
+  # Calibração obrigatória
+  calibration:
+    enabled: true
+    method: "isotonic"
+    
+  # Threshold optimization
+  threshold_optimization:
+    enabled: true
+    methods: ["f1", "profit"]
+    
+    # Custos para threshold profit
+    profit_params:
+      cost_per_trade: 0.002  # 0.2% (fee + slippage)
+      win_return: 0.015      # 1.5% retorno esperado
+
+# Pipeline execution
+execution:
+  # Paralelização
+  parallel_horizons: false  # Sequential para evitar OOM
+  
+  # Limpeza de memória
+  cleanup_memory: true
+  
+  # Early stopping se horizonte falhar
+  stop_on_failure: false
+  
+# MLflow tracking
+tracking:
+  mlflow:
+    enabled: true
+    experiment_name: "multi_horizon_pipeline"
+    
+    # Tags por run
+    common_tags:
+      pipeline_type: "multi_horizon"
+      funding_aware: true
+      adaptive_labeling: true
+      
+  # Artefatos
+  artifacts:
+    save_models: true
+    save_comparisons: true
+    save_correlations: true
+
+# Análise comparativa
+analysis:
+  # Comparação de performance
+  performance_comparison: true
+  
+  # Correlação entre predições
+  prediction_correlation: true
+  
+  # Feature importance por horizonte
+  feature_analysis: true
+  
+  # Salvar relatórios
+  save_reports: true
+
+# Validações
+validation:
+  # Verificar vazamento temporal
+  check_temporal_leakage: true
+  
+  # Validar splits
+  validate_splits: true
+  
+  # Verificar distribuições
+  check_class_distribution: true
+  
+  # Mínimas métricas por horizonte
+  min_metrics:
+    pr_auc: 0.55
+    f1: 0.50
+    mcc: 0.10
+
+# Debug e monitoring
+debug:
+  enabled: false
+  log_intermediate_results: false
+  save_debug_artifacts: false
+  
+# Fast mode para testes
+fast_mode:
+  enabled: false
+  horizons: ['15m', '30m']  # Apenas 2 horizontes
+  n_trials: 5
+  max_samples: 10000
