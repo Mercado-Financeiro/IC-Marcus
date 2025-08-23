@@ -2201,50 +2201,117 @@ if not LOCAL_IMPORTS_AVAILABLE:
         position_mode: str = 'long_short'
         
     class BacktestEngine:
-        """Engine simplificado de backtest"""
+        """Engine de backtest com cálculo correto de P&L"""
         def __init__(self, config: BacktestConfig):
             self.config = config
+            self.capital = config.initial_capital
+            self.position = 0  # Direction: -1, 0, 1
+            self.position_units = 0  # Actual units held
+            self.entry_price = 0
             
         def run_backtest(self, df: pd.DataFrame, signals: pd.Series):
-            """Executa backtest com PnL real"""
+            """Executa backtest com P&L real e position sizing"""
             # Garantir alinhamento de índices
             perf = pd.DataFrame(index=signals.index)
             perf['signals'] = signals
+            perf['open'] = df.loc[signals.index, 'open']
             perf['close'] = df.loc[signals.index, 'close']
             perf['returns'] = perf['close'].pct_change()
             
-            # Estratégia: sinal em t, execução em t+1
-            perf['strategy_returns'] = perf['returns'] * perf['signals'].shift(1)
+            # Inicializar colunas
+            perf['position'] = 0
+            perf['position_units'] = 0.0
+            perf['position_value'] = 0.0
+            perf['unrealized_pnl'] = 0.0
+            perf['realized_pnl'] = 0.0
+            perf['equity'] = self.config.initial_capital
+            perf['costs'] = 0.0
+            perf['trades'] = 0
             
-            # Aplicar custos
-            position_changes = signals.diff().abs()
-            costs = position_changes * (self.config.fee_bps + self.config.slippage_bps) / 10000
-            perf['net_returns'] = perf['strategy_returns'] - costs
+            # State tracking
+            equity = self.config.initial_capital
+            position = 0
+            position_units = 0
+            entry_price = 0
             
-            # Calcular trades com PnL real
+            for i in range(len(perf)):
+                current_price = perf['close'].iloc[i]
+                
+                # Calculate unrealized P&L
+                if position_units != 0 and entry_price > 0:
+                    if position > 0:  # Long
+                        unrealized_pnl = position_units * (current_price - entry_price)
+                    else:  # Short
+                        unrealized_pnl = -position_units * (current_price - entry_price)
+                    perf.iloc[i, perf.columns.get_loc('unrealized_pnl')] = unrealized_pnl
+                
+                # Execute previous bar's signal (t+1 execution)
+                if i > 0:
+                    prev_signal = signals.iloc[i-1]
+                    
+                    if prev_signal != position:
+                        execution_price = perf['open'].iloc[i]
+                        
+                        # Apply slippage
+                        if prev_signal > position:  # Buying
+                            execution_price *= (1 + self.config.slippage_bps / 10000)
+                        elif prev_signal < position:  # Selling
+                            execution_price *= (1 - self.config.slippage_bps / 10000)
+                        
+                        # Close existing position
+                        if position != 0 and position_units != 0:
+                            close_value = abs(position_units * execution_price)
+                            close_cost = close_value * (self.config.fee_bps / 10000)
+                            
+                            # Realize P&L
+                            if position > 0:
+                                realized_pnl = position_units * (execution_price - entry_price)
+                            else:
+                                realized_pnl = -position_units * (execution_price - entry_price)
+                            
+                            equity += realized_pnl - close_cost
+                            perf.iloc[i, perf.columns.get_loc('realized_pnl')] = realized_pnl
+                            perf.iloc[i, perf.columns.get_loc('costs')] += close_cost
+                        
+                        # Open new position
+                        if prev_signal != 0:
+                            # Calculate position size (using available equity)
+                            position_value = equity * self.config.max_leverage * abs(prev_signal)
+                            position_units = position_value / execution_price
+                            
+                            # Opening costs
+                            open_cost = position_value * (self.config.fee_bps / 10000)
+                            equity -= open_cost
+                            
+                            position = prev_signal
+                            entry_price = execution_price
+                            perf.iloc[i, perf.columns.get_loc('costs')] += open_cost
+                            perf.iloc[i, perf.columns.get_loc('trades')] = 1
+                        else:
+                            position = 0
+                            position_units = 0
+                            entry_price = 0
+                
+                # Update state
+                perf.iloc[i, perf.columns.get_loc('position')] = position
+                perf.iloc[i, perf.columns.get_loc('position_units')] = position_units
+                perf.iloc[i, perf.columns.get_loc('position_value')] = abs(position_units * current_price)
+                perf.iloc[i, perf.columns.get_loc('equity')] = equity
+            
+            # Calculate net returns from equity curve
+            perf['net_returns'] = perf['equity'].pct_change()
+            
+            # Extract trades
             trades = pd.DataFrame()
-            trade_signals = signals.diff()
-            entries = trade_signals != 0
-            
-            if entries.any():
-                entry_points = signals.index[entries]
+            trade_entries = perf[perf['trades'] == 1]
+            if len(trade_entries) > 0:
                 trade_list = []
-                
-                for i, entry_time in enumerate(entry_points[:-1]):
-                    exit_time = entry_points[i+1]
-                    entry_idx = signals.index.get_loc(entry_time)
-                    exit_idx = signals.index.get_loc(exit_time)
-                    
-                    # PnL real baseado nos retornos
-                    trade_returns = perf['net_returns'].iloc[entry_idx+1:exit_idx+1]
-                    trade_pnl = (1 + trade_returns).prod() - 1
-                    
-                    trade_list.append({
-                        'entry_time': entry_time,
-                        'exit_time': exit_time,
-                        'pnl': trade_pnl * self.config.initial_capital
-                    })
-                
+                for i in range(len(trade_entries)):
+                    if perf['realized_pnl'].iloc[perf.index.get_loc(trade_entries.index[i])] != 0:
+                        trade_list.append({
+                            'exit_time': trade_entries.index[i],
+                            'pnl': perf['realized_pnl'].iloc[perf.index.get_loc(trade_entries.index[i])]
+                        })
                 trades = pd.DataFrame(trade_list)
             
             return perf, trades

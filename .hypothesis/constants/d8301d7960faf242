@@ -1,0 +1,4 @@
+# file: /home/marcux777/Projeto_IC/src/features/microstructure_features.py
+# hypothesis_version: 6.138.2
+
+[1e-10, 0.2, 0.8, 100, 252, 'accumulation_phase', 'amihud_illiq', 'amihud_illiq_20', 'amihud_illiq_50', 'bearish_bar', 'bullish_bar', 'buy_pressure', 'close', 'close_position', 'cumulative_ofi', 'distribution_phase', 'dollar_volume', 'dollar_volume_20', 'dollar_volume_50', 'high', 'high_momentum', 'hl_spread', 'hl_spread_20', 'hl_spread_50', 'low', 'low_momentum', 'markdown_phase', 'markup_phase', 'momentum_percentile', 'neutral_bar', 'oc_spread', 'oc_spread_20', 'ofi_20', 'open', 'order_flow_imbalance', 'returns', 'roll_measure', 'sell_pressure', 'volume', 'volume_cv_20', 'volume_momentum_20', 'volume_momentum_5', 'volume_ratio', 'volume_sma_20', 'volume_sma_50', 'volume_trend', 'volume_volatility_20', 'volume_weighted_ofi', 'vw_ofi_20']

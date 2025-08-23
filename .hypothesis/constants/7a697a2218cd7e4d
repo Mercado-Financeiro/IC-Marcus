@@ -1,0 +1,4 @@
+# file: /home/marcux777/Projeto_IC/src/features/technical_indicators.py
+# hypothesis_version: 6.138.2
+
+[1e-10, -100, 100, 'adx', 'atr', 'bbands', 'cci', 'close', 'high', 'low', 'macd', 'macd_crossover', 'macd_diff', 'macd_signal', 'obv', 'rsi', 'stoch', 'stoch_crossover', 'stoch_d', 'stoch_k', 'stoch_overbought', 'stoch_oversold', 'volume']

@@ -36,10 +36,11 @@ class TestBacktestEngine:
         engine = BacktestEngine()
         
         # Create signals (signal at t, execution at t+1)
+        # Signals need to persist - not just be set at single points
         signals = pd.Series(0, index=sample_ohlcv_data.index)
-        signals.iloc[10] = 1  # Buy signal at bar 10
-        signals.iloc[20] = 0  # Exit signal at bar 20
-        signals.iloc[30] = -1  # Short signal at bar 30
+        signals.iloc[10:20] = 1   # Buy signal from bar 10 to 19
+        signals.iloc[20:30] = 0   # Exit signal from bar 20 to 29
+        signals.iloc[30:] = -1    # Short signal from bar 30 onwards
         
         results = engine.run_backtest(sample_ohlcv_data, signals)
         
@@ -182,24 +183,25 @@ class TestBacktestEngine:
         assert abs(entry_price - expected_price) / expected_price < 0.01
     
     def test_no_look_ahead_bias(self, sample_ohlcv_data):
-        """Test that there's no look-ahead bias."""
+        """Test that there's no look-ahead bias - simplified version."""
         from src.backtest.engine import BacktestEngine
         
         engine = BacktestEngine()
         
-        # Create signals based on future returns (intentional look-ahead)
-        future_returns = sample_ohlcv_data['close'].pct_change().shift(-1)
-        signals = (future_returns > 0).astype(int)
+        # Create a simple signal pattern: 0,0,0,1,1,1,0,0,0
+        signals = pd.Series(0, index=sample_ohlcv_data.index)
+        signals.iloc[3:6] = 1  # Signal to go long from bar 3 to 5
         
-        # Even with perfect foresight signals, execution at t+1 should limit profits
         results = engine.run_backtest(sample_ohlcv_data, signals)
         
-        # The backtest should not use future information
-        # Positions should lag signals by 1 bar
-        for i in range(1, len(results) - 1):
-            if signals.iloc[i] != signals.iloc[i-1]:  # Signal change
-                # Position shouldn't change immediately
-                assert results['positions'].iloc[i] == results['positions'].iloc[i-1]
+        # The backtest should implement t+1 execution
+        # Signal starts at bar 3, so position should change at bar 4
+        assert results['positions'].iloc[3] == 0, "Position changed on signal bar (should be t+1)"
+        assert results['positions'].iloc[4] == 1, "Position didn't change at t+1"
+        
+        # Signal ends at bar 6, so position should change at bar 7
+        assert results['positions'].iloc[6] == 1, "Position changed early"
+        assert results['positions'].iloc[7] == 0, "Position didn't exit at t+1"
     
     def test_short_selling(self, sample_ohlcv_data):
         """Test short selling functionality."""
@@ -259,6 +261,124 @@ class TestBacktestEngine:
         for timestamp in trades.index:
             hour = timestamp.hour
             assert 9 <= hour < 17, f"Trade outside hours at {timestamp}"
+
+
+class TestPnLCalculation:
+    """Test P&L calculation and position sizing."""
+    
+    def test_realized_pnl_added_to_equity(self, sample_ohlcv_data):
+        """Test that realized P&L is correctly added to equity."""
+        from src.backtest.engine import BacktestEngine
+        
+        engine = BacktestEngine(initial_capital=100000, fee_bps=0, slippage_bps=0)
+        
+        # Create simple signals: buy at 10, sell at 20
+        signals = pd.Series(0, index=sample_ohlcv_data.index)
+        signals.iloc[10:20] = 1  # Hold position from 10 to 19
+        signals.iloc[20:] = 0    # Exit at 20
+        
+        results = engine.run_backtest(sample_ohlcv_data, signals)
+        
+        # Check that realized P&L is added to equity
+        realized_pnl_total = results['realized_pnl'].sum()
+        total_costs = results['total_costs'].sum()
+        final_equity = results['equity'].iloc[-1]
+        
+        # With no costs (fee_bps=0, slippage_bps=0), final equity should equal initial capital + realized P&L
+        expected_equity = 100000 + realized_pnl_total - total_costs
+        
+        # Debug info if test fails
+        if abs(final_equity - expected_equity) >= 1:
+            print(f"Initial capital: 100000")
+            print(f"Realized P&L total: {realized_pnl_total}")
+            print(f"Total costs: {total_costs}")
+            print(f"Final equity: {final_equity}")
+            print(f"Expected equity: {expected_equity}")
+            print(f"Difference: {final_equity - expected_equity}")
+        
+        assert abs(final_equity - expected_equity) < 1, f"Equity mismatch: {final_equity} vs {expected_equity}"
+    
+    def test_position_units_tracking(self, sample_ohlcv_data):
+        """Test that position units are correctly tracked."""
+        from src.backtest.engine import BacktestEngine
+        
+        engine = BacktestEngine(initial_capital=100000)
+        
+        # Create buy signal and hold
+        signals = pd.Series(0, index=sample_ohlcv_data.index)
+        signals.iloc[10:] = 1  # Buy and hold from bar 10
+        
+        results = engine.run_backtest(sample_ohlcv_data, signals)
+        
+        # Check that position_units and position_size are tracked
+        assert 'position_units' in results.columns
+        assert 'position_size' in results.columns
+        
+        # After buy signal at 10, position units should be set at 11 (t+1)
+        position_units_at_11 = results['position_units'].iloc[11]
+        position_size_at_11 = results['position_size'].iloc[11]
+        assert position_units_at_11 > 0, "Position units not set after buy signal"
+        assert position_size_at_11 > 0, "Position size not set after buy signal"
+        
+        # Position value should match units * price
+        position_value = results['position_value'].iloc[11]
+        current_price = results['close'].iloc[11]
+        expected_value = abs(position_units_at_11 * current_price)
+        assert abs(position_value - expected_value) < 1, "Position value doesn't match units * price"
+    
+    def test_variable_position_sizing(self, sample_ohlcv_data):
+        """Test variable position sizing based on signal strength."""
+        from src.backtest.engine import BacktestEngine
+        
+        engine = BacktestEngine(initial_capital=100000)
+        
+        # Create signals with different strengths
+        signals = pd.Series(0.0, index=sample_ohlcv_data.index)
+        signals.iloc[10:20] = 0.5  # Half position from 10 to 19
+        signals.iloc[20:] = 1.0    # Full position from 20 onwards
+        
+        results = engine.run_backtest(sample_ohlcv_data, signals)
+        
+        # Position at 11 should be smaller than position at 21
+        units_half = abs(results['position_units'].iloc[11])
+        units_full = abs(results['position_units'].iloc[21])
+        
+        # Full position should be larger (accounting for equity changes)
+        assert units_full > units_half * 1.5, "Variable position sizing not working"
+    
+    def test_pnl_with_price_changes(self):
+        """Test P&L calculation with specific price movements."""
+        from src.backtest.engine import BacktestEngine
+        
+        # Create controlled price data
+        dates = pd.date_range('2023-01-01', periods=30, freq='1h', tz='UTC')
+        prices = [100] * 10 + [110] * 10 + [105] * 10  # Price goes up then down
+        
+        df = pd.DataFrame({
+            'open': prices,
+            'high': [p + 1 for p in prices],
+            'low': [p - 1 for p in prices],
+            'close': prices,
+            'volume': [1000] * 30
+        }, index=dates)
+        
+        # Buy at bar 5, sell at bar 15 (after price increase)
+        # Signals need to persist - not just be set at single points
+        signals = pd.Series(0, index=df.index)
+        signals.iloc[5:15] = 1  # Hold long position from bar 5 to 14
+        signals.iloc[15:] = 0   # Exit at bar 15 onwards
+        
+        engine = BacktestEngine(initial_capital=100000, fee_bps=0, slippage_bps=0)
+        results = engine.run_backtest(df, signals)
+        
+        # Should have positive realized P&L (bought at 100, sold at 110)
+        realized_pnl = results['realized_pnl'].sum()
+        assert realized_pnl > 0, f"Expected positive P&L, got {realized_pnl}"
+        
+        # P&L should be approximately 10% of position size
+        position_value = results['position_value'].iloc[6]  # Position opened at bar 6
+        expected_pnl = position_value * 0.1  # 10% gain
+        assert abs(realized_pnl - expected_pnl) / expected_pnl < 0.1, "P&L calculation incorrect"
 
 
 class TestBacktestEngineEdgeCases:

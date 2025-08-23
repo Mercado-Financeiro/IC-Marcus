@@ -9,7 +9,8 @@ from pathlib import Path
 import joblib
 
 # ML imports
-from sklearn.model_selection import TimeSeriesSplit
+# Use temporal validator with embargo
+from src.features.validation.temporal import TemporalValidator, TemporalValidationConfig
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, average_precision_score, matthews_corrcoef,

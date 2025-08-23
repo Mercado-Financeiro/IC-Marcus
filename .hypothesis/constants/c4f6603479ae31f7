@@ -1,0 +1,4 @@
+# file: /home/marcux777/Projeto_IC/src/features/derivatives.py
+# hypothesis_version: 6.138.2
+
+[1e-10, 0.01, 0.05, 0.8, 0.95, 288, 365, 500, 1000, '1H', '5m', 'BTCUSDT', 'backwardation', 'basis', 'basis_annualized', 'basis_change', 'basis_extreme_high', 'basis_extreme_low', 'basis_momentum', 'basis_pct', 'basis_volatility', 'basis_zscore', 'close', 'contango', 'endTime', 'fundingRate', 'fundingTime', 'funding_apr', 'funding_change', 'funding_change_abs', 'funding_extreme_high', 'funding_extreme_low', 'funding_rate', 'limit', 'liquidation_risk', 'long_positioning', 'ms', 'oi', 'oi_change', 'oi_pct_change', 'oi_price_weighted', 'oi_volume_ratio', 'period', 'short_positioning', 'startTime', 'sumOpenInterest', 'sumOpenInterestValue', 'symbol', 'timestamp', 'volume']

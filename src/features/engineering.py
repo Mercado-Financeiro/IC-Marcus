@@ -10,7 +10,7 @@ import warnings
 from src.features.price_features import PriceFeatures
 from src.features.volatility_features import VolatilityFeatures
 from src.features.technical_indicators import TechnicalIndicators
-from src.features.microstructure_features import MicrostructureFeatures
+from src.features.microstructure import MicrostructureFeatures
 from src.features.calendar_features import CalendarFeatures
 
 warnings.filterwarnings("ignore")

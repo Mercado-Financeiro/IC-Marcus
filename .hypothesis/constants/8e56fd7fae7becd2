@@ -1,0 +1,4 @@
+# file: /home/marcux777/Projeto_IC/src/features/adaptive_labeling.py
+# hypothesis_version: 6.138.2
+
+[0.001, 0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 480, '120m', '15m', '240m', '30m', '60m', 'ADAUSDT', 'BNBUSDT', 'BTCUSDT', 'DOGEUSDT', 'DOTUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'atr', 'balance_ratio', 'close', 'counts', 'f1', 'garman_klass', 'ignore', 'max', 'mean', 'median', 'min', 'parkinson', 'pr_auc', 'proportions', 'q25', 'q75', 'realized', 'std', 'total', 'weighted', 'yang_zhang']

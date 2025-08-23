@@ -41,6 +41,10 @@ from src.features.engineering import FeatureEngineer
 from src.models.xgb_optuna import XGBoostOptuna
 from src.models.lstm_optuna import LSTMOptuna
 from src.backtest.engine import BacktestEngine
+try:
+    import ta  # For optional volatility-weighted sampling
+except Exception:  # pragma: no cover
+    ta = None
 
 # Seed global
 SEED = 42
@@ -139,19 +143,14 @@ class OptimizationPipeline:
             df['rsi'] = self._calculate_rsi(df['close'])
             feature_cols = ['returns', 'sma_20', 'rsi']
         else:
-            # Features completas usando configuração
+            # Features completas usando orquestrador unificado
             lookback_periods = features_config.get('lookback_periods', [5, 10, 20, 50, 100])
             feature_eng = FeatureEngineer(lookback_periods=lookback_periods)
-
-            # Aplicar features conforme configuração
-            df = feature_eng.create_price_features(df)
-            df = feature_eng.create_technical_indicators(df)
-
-            # Features avançadas se habilitadas
-            if features_config.get('microstructure', {}).get('enabled', False):
-                df = feature_eng.create_microstructure_features(df)
-
-            feature_cols = [c for c in df.columns if c not in ['open', 'high', 'low', 'close', 'volume', 'label']]
+            df = feature_eng.create_all_features(df)
+            feature_cols = [
+                c for c in df.columns
+                if c not in ['open', 'high', 'low', 'close', 'volume', 'label']
+            ]
 
         # Labeling direcional MELHORADO para criptomoedas (baseado no diagnóstico)
         # Implementando threshold mais restritivo para filtrar ruído
@@ -190,7 +189,7 @@ class OptimizationPipeline:
         df['label'] = (df['label'] == 1).astype(int)
 
         # Sample weights baseados na volatilidade (opcional)
-        if labels_config.get('use_volatility_weights', False):
+        if labels_config.get('use_volatility_weights', False) and ta is not None:
             # Usar ATR para ponderar amostras mais voláteis
             if 'atr_14' not in df.columns:
                 df['atr_14'] = ta.volatility.AverageTrueRange(

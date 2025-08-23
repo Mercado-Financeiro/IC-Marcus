@@ -329,7 +329,7 @@ class LSTMProbabilistic(BaseEstimator, RegressorMixin):
             torch.FloatTensor(y_seq)
         )
         train_loader = DataLoader(
-            train_dataset, batch_size=self.batch_size, shuffle=True
+            train_dataset, batch_size=self.batch_size, shuffle=False  # Never shuffle time series!
         )
         
         # Training loop

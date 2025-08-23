@@ -1,0 +1,4 @@
+# file: /home/marcux777/Projeto_IC/src/features/engineering.py
+# hypothesis_version: 6.138.2
+
+[100, 200, 288, 'BTCUSDT', 'adx', 'amihud', 'atr', 'bb_', 'bbands', 'calendar', 'cci', 'center_', 'close', 'coef_', 'creating_features', 'day', 'ema', 'feature', 'feature_importances_', 'features_created', 'gk_', 'high', 'hour', 'ignore', 'importance', 'importance_pct', 'kyle', 'liquidity', 'low', 'macd', 'mean_', 'microstructure', 'momentum', 'month', 'obv', 'open', 'other', 'parkinson', 'price', 'returns', 'robust', 'rsi', 'scaler_fitted', 'session', 'sma', 'spread', 'standard', 'stoch', 'technical', 'vol_', 'volatility', 'volume', 'vwap', 'weekend', 'zscore']

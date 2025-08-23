@@ -10,7 +10,8 @@ import joblib
 
 # ML imports
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import TimeSeriesSplit
+# Use temporal validator with embargo
+from src.features.validation.temporal import TemporalValidator, TemporalValidationConfig
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, average_precision_score, matthews_corrcoef,
@@ -293,7 +294,7 @@ if TORCH_AVAILABLE and OPTUNA_AVAILABLE:
         train_loader = DataLoader(
             train_dataset, 
             batch_size=batch_size, 
-            shuffle=True, 
+            shuffle=False,  # NEVER shuffle time series data!
             drop_last=True
         )
         val_loader = DataLoader(

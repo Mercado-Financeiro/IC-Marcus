@@ -47,6 +47,47 @@ Neutral Zone: Reduces overtrading and improves Sharpe ratio
 
 **Ensemble**: Weighted combination of both models
 
+## 🛡️ Temporal Validation Strategy
+
+### CRITICAL: No Temporal Leakage Policy
+
+**PRINCIPLE**: Zero tolerance for temporal leakage in validation.
+
+**IMPLEMENTATION**:
+```
+Unified Validation: src/features/validation/temporal.py
+Default Strategy: Purged K-Fold with embargo
+Embargo: 10+ bars between train/validation
+Purge: 5+ bars before validation starts
+Never Shuffle: shuffle=False enforced everywhere
+```
+
+**VALIDATION STRATEGIES**:
+
+1. **Purged K-Fold** (Default)
+   - K-fold with temporal purging and embargo
+   - Prevents label overlap in triple-barrier scenarios
+   - Embargo ensures no information leakage
+   - Best for model selection and hyperparameter tuning
+
+2. **Walk-Forward Analysis**
+   - Fixed or expanding windows
+   - Most realistic for production simulation
+   - Used for final model evaluation
+   - Mimics real trading conditions
+
+3. **Combinatorial Purged CV**
+   - Advanced method from López de Prado
+   - Multiple test group combinations
+   - Maximum data utilization
+   - Used for robust statistical testing
+
+**ENFORCEMENT**:
+- Automatic leakage detection in every split
+- Runtime errors if shuffle=True detected
+- Validation before model training
+- Comprehensive test suite in test_temporal_validation.py
+
 ## 🔄 Data Flow
 
 ```

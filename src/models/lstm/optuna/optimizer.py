@@ -75,12 +75,13 @@ class LSTMOptuna:
             'bidirectional': trial.suggest_categorical('bidirectional', [True, False])
         }
         
-        # Perform cross-validation
-        from sklearn.model_selection import TimeSeriesSplit
-        tscv = TimeSeriesSplit(n_splits=self.config.cv_folds)
+        # Perform cross-validation with embargo
+        from src.features.validation.temporal import TemporalValidator, TemporalValidationConfig
+        val_config = TemporalValidationConfig(n_splits=self.config.cv_folds, embargo=10)
+        validator = TemporalValidator(val_config)
         scores = []
         
-        for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
+        for fold, (train_idx, val_idx) in enumerate(validator.split(X, y, strategy='purged_kfold')):
             X_train, X_val = X[train_idx], X[val_idx]
             y_train, y_val = y[train_idx], y[val_idx]
             

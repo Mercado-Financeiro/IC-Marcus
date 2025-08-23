@@ -9,7 +9,8 @@ import pandas as pd
 import xgboost as xgb
 from typing import Dict, List, Optional, Tuple, Any
 from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.model_selection import TimeSeriesSplit
+# Use temporal validator instead of sklearn TimeSeriesSplit
+from src.features.validation.temporal import TemporalValidator, TemporalValidationConfig
 from sklearn.metrics import roc_auc_score, brier_score_loss
 import optuna
 from optuna.pruners import MedianPruner, HyperbandPruner
@@ -369,11 +370,12 @@ class XGBQuantileOptuna:
             **params
         )
         
-        # Time series cross-validation
-        tscv = TimeSeriesSplit(n_splits=self.cv_folds)
+        # Time series cross-validation with embargo
+        val_config = TemporalValidationConfig(n_splits=self.cv_folds, embargo=10)
+        validator = TemporalValidator(val_config)
         scores = []
         
-        for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
+        for fold, (train_idx, val_idx) in enumerate(validator.split(X, y, strategy='purged_kfold')):
             # Apply embargo
             if self.embargo > 0:
                 val_start = val_idx[0]

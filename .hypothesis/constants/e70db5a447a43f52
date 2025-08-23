@@ -1,0 +1,4 @@
+# file: /home/marcux777/Projeto_IC/src/features/onchain.py
+# hypothesis_version: 6.138.2
+
+[0.0, 1e-10, 0.01, 0.05, 0.1, 0.15, 0.2, 0.7, 365, 1000, 100000, 'active_addresses', 'asopr', 'close', 'dormancy_flow', 'exchange_inflow', 'exchange_netflow', 'exchange_outflow', 'ffill', 'hash_rate_proxy', 'high', 'low', 'mvrv_calculated', 'mvrv_zscore', 'nvt_calculated', 'nvt_ratio', 'puell_multiple', 'sopr_calculated', 'volume', 'whale_signal']

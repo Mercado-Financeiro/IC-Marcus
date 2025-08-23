@@ -47,13 +47,20 @@ def create_objective(
         # Add scale_pos_weight for imbalanced data
         params['scale_pos_weight'] = calculate_scale_pos_weight(y)
         
-        # Import here to avoid circular dependency
-        from data.splits import PurgedKFold
-        cv = PurgedKFold(n_splits=config.cv_folds, embargo=config.embargo)
+        # Import temporal validator
+        from src.features.validation.temporal import TemporalValidator, TemporalValidationConfig
+        
+        # Configure temporal validation
+        val_config = TemporalValidationConfig(
+            n_splits=config.cv_folds,
+            embargo=config.embargo,
+            check_leakage=True
+        )
+        validator = TemporalValidator(val_config)
         
         scores = []
         
-        for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X, y)):
+        for fold_idx, (train_idx, val_idx) in enumerate(validator.split(X, y, strategy='purged_kfold')):
             X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
             y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
             

@@ -10,7 +10,12 @@ import sys
 
 sys.path.append(str(Path(__file__).parent.parent))
 
+from src.utils.logging_config import get_logger, safe_divide, validate_dataframe
+
 warnings.filterwarnings('ignore')
+
+# Initialize module logger
+log = get_logger(__name__)
 
 
 @dataclass
@@ -67,8 +72,9 @@ class BacktestEngine:
         
         # State variables
         self.capital = initial_capital
-        self.position = 0
-        self.position_size = 0
+        self.position = 0  # Direction: -1, 0, 1
+        self.position_size = 0  # Value in currency
+        self.position_units = 0  # Number of units (e.g., BTC)
         self.entry_price = 0
         
     def calculate_costs(self, trade_value: float, holding_period: int = 1) -> float:
@@ -87,10 +93,10 @@ class BacktestEngine:
         # Funding cost (pro-rated)
         # Assuming 15-minute bars, 96 bars per day
         bars_per_year = 365 * 24 * 4  # 15-min bars
-        funding_cost = trade_value * self.funding_apr * holding_period / bars_per_year
+        funding_cost = trade_value * self.funding_apr * safe_divide(holding_period, bars_per_year, default=0)
         
         # Borrow cost for shorts
-        borrow_cost = trade_value * self.borrow_apr * holding_period / bars_per_year
+        borrow_cost = trade_value * self.borrow_apr * safe_divide(holding_period, bars_per_year, default=0)
         
         return transaction_cost + funding_cost + borrow_cost
     
@@ -139,7 +145,7 @@ class BacktestEngine:
         elif method == 'volatility_target':
             # Size to target specific volatility
             if volatility > 0:
-                size = capital * (vol_target / volatility) * abs(signal_strength)
+                size = capital * safe_divide(vol_target, volatility, default=0) * abs(signal_strength)
             else:
                 size = capital * self.max_leverage * abs(signal_strength)
         else:
@@ -216,9 +222,13 @@ class BacktestEngine:
         results['close'] = data['close']
         results['signal'] = signals
         results['positions'] = 0.0
+        results['position_units'] = 0.0  # Track actual units
+        results['position_size'] = 0.0  # Track position value in currency
         results['entry_prices'] = np.nan
         results['pnl'] = 0.0
-        results['equity'] = self.initial_capital
+        results['unrealized_pnl'] = 0.0
+        results['realized_pnl'] = 0.0
+        results['equity'] = float(self.initial_capital)
         results['trades'] = 0
         results['costs'] = 0.0
         results['position_value'] = 0.0
@@ -227,19 +237,22 @@ class BacktestEngine:
         
         # State tracking
         equity = self.initial_capital
-        position = 0
+        position = 0  # Direction: -1, 0, 1
+        position_units = 0  # Actual units held
+        position_size = 0  # Position value in currency
         entry_price = 0
         
         for i in range(len(data)):
             current_price = data['close'].iloc[i]
             
-            # Calculate P&L for existing position
-            if position != 0 and entry_price > 0:
-                if position > 0:
-                    pnl = position * (current_price - entry_price)
+            # Calculate unrealized P&L for existing position
+            if position_units != 0 and entry_price > 0:
+                if position > 0:  # Long position
+                    unrealized_pnl = position_units * (current_price - entry_price)
                 else:  # Short position
-                    pnl = -position * (current_price - entry_price)
-                results.loc[results.index[i], 'pnl'] = pnl
+                    unrealized_pnl = -position_units * (current_price - entry_price)
+                results.loc[results.index[i], 'unrealized_pnl'] = unrealized_pnl
+                results.loc[results.index[i], 'pnl'] = unrealized_pnl
             
             # Execute previous bar's signal at current bar (t+1 execution)
             if i > 0:
@@ -256,13 +269,13 @@ class BacktestEngine:
                     
                     # Apply slippage
                     if prev_signal > position:  # Buying
-                        execution_price *= (1 + self.slippage_bps / 10000)
+                        execution_price *= (1 + safe_divide(self.slippage_bps, 10000, default=0))
                     elif prev_signal < position:  # Selling
-                        execution_price *= (1 - self.slippage_bps / 10000)
+                        execution_price *= (1 - safe_divide(self.slippage_bps, 10000, default=0))
                     
                     # Close existing position
-                    if position != 0:
-                        close_value = abs(position * execution_price)
+                    if position != 0 and position_units != 0:
+                        close_value = abs(position_units * execution_price)
                         close_cost = self.calculate_costs(close_value)
                         equity -= close_cost
                         results.loc[results.index[i], 'costs'] = close_cost
@@ -270,15 +283,21 @@ class BacktestEngine:
                         
                         # Realize P&L
                         if position > 0:
-                            realized_pnl = position * (execution_price - entry_price)
+                            realized_pnl = position_units * (execution_price - entry_price)
                         else:
-                            realized_pnl = -position * (execution_price - entry_price)
-                        # equity += realized_pnl # This was double-counting P&L
+                            realized_pnl = -position_units * (execution_price - entry_price)
+                        
+                        # Add realized P&L to equity (THIS IS THE KEY FIX!)
+                        equity += realized_pnl
+                        results.loc[results.index[i], 'realized_pnl'] = realized_pnl
+                        
+                        # Reset position size when closing
+                        position_size = 0
                     
                     # Open new position
                     if prev_signal != 0:
                         # Calculate position size
-                        position_value = self.calculate_position_size(
+                        position_size = self.calculate_position_size(
                             method='fixed',
                             capital=equity,
                             signal_strength=abs(prev_signal)
@@ -287,20 +306,26 @@ class BacktestEngine:
                         # Check if short is allowed
                         if prev_signal < 0 and not self.allow_short:
                             position = 0
+                            position_units = 0
+                            position_size = 0
                         else:
-                            # Store position as signal direction for simplicity
-                            # Actual size is tracked separately
+                            # Store position direction
                             position = prev_signal
                             entry_price = execution_price
                             
+                            # Calculate position in units (e.g., BTC)
+                            position_units = safe_divide(position_size, execution_price, default=0)
+                            
                             # Opening costs
-                            open_cost = self.calculate_costs(position_value)
+                            open_cost = self.calculate_costs(position_size)
                             equity -= open_cost
                             results.loc[results.index[i], 'costs'] += open_cost
                             results.loc[results.index[i], 'total_costs'] += open_cost
                             results.loc[results.index[i], 'entry_prices'] = entry_price
                     else:
                         position = 0
+                        position_units = 0
+                        position_size = 0
                         entry_price = 0
                     
                     # Record trade
@@ -314,8 +339,14 @@ class BacktestEngine:
             
             # Update position and equity
             results.loc[results.index[i], 'positions'] = position
+            results.loc[results.index[i], 'position_units'] = position_units
+            results.loc[results.index[i], 'position_size'] = position_size
             results.loc[results.index[i], 'equity'] = equity
-            results.loc[results.index[i], 'position_value'] = abs(position) * current_price if position != 0 else 0
+            results.loc[results.index[i], 'position_value'] = abs(position_units) * current_price if position_units != 0 else 0
+            
+            # Assert equity consistency
+            assert np.isfinite(equity), f"Non-finite equity at bar {i}: {equity}"
+            assert equity >= 0 or self.allow_short, f"Negative equity without shorting at bar {i}: {equity}"
         
         return results
     
@@ -332,7 +363,7 @@ class BacktestEngine:
         returns = results['equity'].pct_change().dropna()
         
         # Basic metrics
-        total_return = (results['equity'].iloc[-1] / self.initial_capital) - 1
+        total_return = safe_divide(results['equity'].iloc[-1], self.initial_capital, default=1) - 1
         
         # Annualized metrics (assuming 15-min bars)
         bars_per_year = 365 * 24 * 4
@@ -385,7 +416,7 @@ class BacktestEngine:
         # Profit factor
         gross_profits = results[results['pnl'] > 0]['pnl'].sum()
         gross_losses = abs(results[results['pnl'] < 0]['pnl'].sum())
-        profit_factor = gross_profits / gross_losses if gross_losses > 0 else 0
+        profit_factor = safe_divide(gross_profits, gross_losses, default=0)
         
         # Deflated Sharpe Ratio
         dsr = self.calculate_dsr(sharpe_ratio, n_trials=100, T=n_bars)

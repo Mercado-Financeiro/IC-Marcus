@@ -1,0 +1,4 @@
+# file: /home/marcux777/Projeto_IC/src/features/microstructure.py
+# hypothesis_version: 6.138.2
+
+[1e-10, 'ask_volume', 'bid_volume', 'close', 'obi', 'obi_momentum', 'obi_weighted', 'trade_intensity', 'volume', 'vpin', 'vpin_momentum']

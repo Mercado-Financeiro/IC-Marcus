@@ -6,6 +6,8 @@ import ta
 from typing import List
 import structlog
 
+from .validation import validate_inputs, validate_outputs, log_execution_time
+
 log = structlog.get_logger()
 
 
@@ -23,6 +25,8 @@ class TechnicalIndicators:
             "rsi", "macd", "bbands", "atr", "obv", "adx", "cci", "stoch"
         ]
     
+    @validate_inputs(['close'], min_rows=14, validate_numeric=True)
+    @validate_outputs(['rsi_14', 'rsi_14_overbought', 'rsi_14_oversold'])
     def calculate_rsi(self, df: pd.DataFrame, periods: List[int] = None) -> pd.DataFrame:
         """
         Calculate RSI indicators.
@@ -37,13 +41,14 @@ class TechnicalIndicators:
         periods = periods or [7, 14, 21]
         
         for period in periods:
-            df[f"rsi_{period}"] = ta.momentum.RSIIndicator(
-                df["close"], window=period
-            ).rsi()
-            
-            # RSI overbought/oversold signals
-            df[f"rsi_{period}_overbought"] = (df[f"rsi_{period}"] > 70).astype(int)
-            df[f"rsi_{period}_oversold"] = (df[f"rsi_{period}"] < 30).astype(int)
+            if period <= len(df):  # Additional check for sufficient data
+                df[f"rsi_{period}"] = ta.momentum.RSIIndicator(
+                    df["close"], window=period
+                ).rsi()
+                
+                # RSI overbought/oversold signals
+                df[f"rsi_{period}_overbought"] = (df[f"rsi_{period}"] > 70).astype(int)
+                df[f"rsi_{period}_oversold"] = (df[f"rsi_{period}"] < 30).astype(int)
         
         return df
     
@@ -229,6 +234,8 @@ class TechnicalIndicators:
         
         return df
     
+    @validate_inputs(['open', 'high', 'low', 'close', 'volume'], min_rows=26, validate_ohlcv=True)
+    @log_execution_time
     def calculate_all(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Calculate all selected technical indicators.

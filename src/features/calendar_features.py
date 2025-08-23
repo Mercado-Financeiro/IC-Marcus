@@ -185,7 +185,7 @@ class CalendarFeatures:
     
     def calculate_time_components(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Extract basic time components.
+        Extract basic time components using centralized method.
         
         Args:
             df: DataFrame with datetime index
@@ -193,25 +193,18 @@ class CalendarFeatures:
         Returns:
             DataFrame with time component features
         """
-        # Basic time components
-        df["hour"] = df.index.hour
-        df["day_of_week"] = df.index.dayofweek
-        df["day_of_month"] = df.index.day
-        df["month"] = df.index.month
-        df["quarter"] = df.index.quarter
-        df["year"] = df.index.year
+        # Use the crypto calendar method to avoid duplication
+        crypto_calendar = self.crypto_features.create_calendar_features(df)
         
-        # Week of year
-        df["week_of_year"] = df.index.isocalendar().week
+        # Add extra components not in crypto method
+        crypto_calendar["year"] = df.index.year
+        crypto_calendar["day_of_year"] = df.index.dayofyear
         
-        # Day of year
-        df["day_of_year"] = df.index.dayofyear
-        
-        return df
+        return crypto_calendar
     
     def calculate_cyclical_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Calculate cyclical encoding for time features.
+        Calculate additional cyclical features not covered by crypto method.
         
         Args:
             df: DataFrame with time components
@@ -219,20 +212,8 @@ class CalendarFeatures:
         Returns:
             DataFrame with cyclical features
         """
-        # Hour cyclical encoding
-        if "hour" in df.columns:
-            df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
-            df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
-        
-        # Day of week cyclical encoding
-        if "day_of_week" in df.columns:
-            df["day_sin"] = np.sin(2 * np.pi * df["day_of_week"] / 7)
-            df["day_cos"] = np.cos(2 * np.pi * df["day_of_week"] / 7)
-        
-        # Month cyclical encoding
-        if "month" in df.columns:
-            df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
-            df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
+        # Add additional cyclical features not in crypto method
+        # (crypto method already has hour_sin/cos, dow_sin/cos, month_sin/cos)
         
         # Day of month cyclical encoding
         if "day_of_month" in df.columns:
@@ -243,7 +224,7 @@ class CalendarFeatures:
     
     def calculate_trading_sessions(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Calculate trading session indicators.
+        Calculate additional trading session indicators using centralized method.
         
         Args:
             df: DataFrame with hour feature
@@ -254,46 +235,23 @@ class CalendarFeatures:
         if "hour" not in df.columns:
             raise ValueError("DataFrame must contain 'hour' column")
         
-        # Trading sessions (UTC)
-        # Asian: 00:00-08:00
-        df["asian_session"] = (
-            (df["hour"] >= 0) & (df["hour"] < 8)
-        ).astype(int)
+        # Use crypto session method to avoid duplication
+        crypto_sessions = self.crypto_features.create_session_features(df)
         
-        # European: 08:00-16:00
-        df["european_session"] = (
-            (df["hour"] >= 8) & (df["hour"] < 16)
-        ).astype(int)
+        # Add any additional session features not in crypto method
+        # (crypto method already covers main sessions and overlaps)
         
-        # American: 16:00-00:00
-        df["american_session"] = (
-            (df["hour"] >= 16) & (df["hour"] < 24)
-        ).astype(int)
-        
-        # Session overlaps
-        df["asia_europe_overlap"] = (
-            (df["hour"] >= 7) & (df["hour"] < 9)
-        ).astype(int)
-        
-        df["europe_america_overlap"] = (
-            (df["hour"] >= 14) & (df["hour"] < 17)
-        ).astype(int)
-        
-        df["session_overlap"] = (
-            df["asia_europe_overlap"] | df["europe_america_overlap"]
-        ).astype(int)
-        
-        # Active trading hours (high volume periods)
-        df["active_hours"] = (
+        # Active trading hours (high volume periods) - additional feature
+        crypto_sessions["active_hours"] = (
             ((df["hour"] >= 8) & (df["hour"] <= 10)) |  # Europe open
             ((df["hour"] >= 14) & (df["hour"] <= 16))   # US open
         ).astype(int)
         
-        return df
+        return crypto_sessions
     
     def calculate_special_periods(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Calculate special time period indicators.
+        Calculate additional special time period indicators.
         
         Args:
             df: DataFrame with time components
@@ -301,9 +259,8 @@ class CalendarFeatures:
         Returns:
             DataFrame with special period features
         """
-        # Weekend
+        # Additional weekday indicators (is_weekend already in crypto method)
         if "day_of_week" in df.columns:
-            df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
             df["is_weekday"] = (df["day_of_week"] < 5).astype(int)
             df["is_monday"] = (df["day_of_week"] == 0).astype(int)
             df["is_friday"] = (df["day_of_week"] == 4).astype(int)
@@ -375,28 +332,35 @@ class CalendarFeatures:
         """
         df = df.copy()
         
-        # Standard calendar features
-        df = self.calculate_time_components(df)
-        df = self.calculate_cyclical_features(df)
-        df = self.calculate_trading_sessions(df)
-        df = self.calculate_special_periods(df)
-        df = self.calculate_time_since_events(df)
-        
-        # Enhanced crypto 24/7 features
         if self.include_crypto_features:
-            # Add crypto-specific calendar features
+            # Use centralized crypto methods directly
             crypto_calendar = self.crypto_features.create_calendar_features(df)
             crypto_sessions = self.crypto_features.create_session_features(df)
             crypto_funding = self.crypto_features.create_funding_features(
                 df, funding_period_minutes=funding_period_minutes
             )
             
-            # Combine all features (avoid duplicates)
-            existing_cols = set(df.columns)
+            # Start with crypto features as base
             for features_df in [crypto_calendar, crypto_sessions, crypto_funding]:
+                existing_cols = set(df.columns)
                 new_cols = [col for col in features_df.columns if col not in existing_cols]
                 if new_cols:
                     df = pd.concat([df, features_df[new_cols]], axis=1)
-                    existing_cols.update(new_cols)
+            
+            # Add any additional features not covered
+            df = self.calculate_cyclical_features(df)  # Will only add day_of_month_sin/cos
+            df = self.calculate_special_periods(df)    # Will add extra weekday flags
+            df = self.calculate_time_since_events(df)
+            
+            # Add year and day_of_year not in crypto
+            df["year"] = df.index.year
+            df["day_of_year"] = df.index.dayofyear
+        else:
+            # Fallback to standard methods
+            df = self.calculate_time_components(df)
+            df = self.calculate_cyclical_features(df)
+            df = self.calculate_trading_sessions(df)
+            df = self.calculate_special_periods(df)
+            df = self.calculate_time_since_events(df)
         
         return df

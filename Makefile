@@ -39,19 +39,19 @@ print('✅ Determinismo configurado (SEED=42)')"
 
 train-xgb:
 	@echo "🎯 Treinando XGBoost com $(SYMBOL) $(TIMEFRAME)..."
-	$(PYTHON) run_optimization.py --model xgboost --symbol $(SYMBOL) --timeframe $(TIMEFRAME)
+	$(PYTHON) run_optimization.py --model xgboost --symbol $(SYMBOL) --timeframe $(TIMEFRAME) --config configs/xgb.yaml
 
 train-lstm:
 	@echo "🧠 Treinando LSTM com $(SYMBOL) $(TIMEFRAME)..."
-	$(PYTHON) run_optimization.py --model lstm --symbol $(SYMBOL) --timeframe $(TIMEFRAME)
+	$(PYTHON) run_optimization.py --model lstm --symbol $(SYMBOL) --timeframe $(TIMEFRAME) --config configs/lstm.yaml
 
 train-both:
 	@echo "🚀 Treinando XGBoost e LSTM com $(SYMBOL) $(TIMEFRAME)..."
-	$(PYTHON) run_optimization.py --model both --symbol $(SYMBOL) --timeframe $(TIMEFRAME)
+	$(PYTHON) run_optimization.py --model both --symbol $(SYMBOL) --timeframe $(TIMEFRAME) --config configs/xgb.yaml --config-lstm configs/lstm.yaml
 
 quick-test:
 	@echo "⚡ Teste rápido com XGBoost..."
-	$(PYTHON) run_optimization.py --quick --model xgboost --symbol $(SYMBOL) --timeframe $(TIMEFRAME)
+	$(PYTHON) run_optimization.py --quick --model xgboost --symbol $(SYMBOL) --timeframe $(TIMEFRAME) --config configs/xgb.yaml
 
 # Pipeline Notebook (NOVO - Sistema Corrigido)
 .PHONY: train-notebook quick-notebook validate-notebook
@@ -67,6 +67,51 @@ quick-notebook:
 validate-notebook:
 	@echo "🧪 Validação completa Pipeline Notebook..."
 	$(PYTHON) run_notebook_pipeline.py --mode validation
+
+# Multi-Horizon Pipeline (Migrado do Notebook)
+.PHONY: train-multi-horizon quick-multi-horizon validate-multi-horizon
+
+train-multi-horizon:
+	@echo "🎯 Multi-Horizon Pipeline PRODUÇÃO com $(SYMBOL) $(TIMEFRAME)..."
+	$(PYTHON) -m src.models.multi_horizon --config configs/multi_horizon.yaml --symbol $(SYMBOL) --timeframe $(TIMEFRAME) --trials 50
+
+quick-multi-horizon:
+	@echo "⚡ Demo rápida Multi-Horizon Pipeline..."
+	$(PYTHON) -m src.models.multi_horizon --config configs/multi_horizon.yaml --symbol $(SYMBOL) --timeframe $(TIMEFRAME) --trials 5 --quick
+
+validate-multi-horizon:
+	@echo "🧪 Validação Multi-Horizon Pipeline..."
+	$(PYTHON) -m src.models.multi_horizon --config configs/multi_horizon.yaml --validate
+
+# LSTM Complete Pipeline (Migrado do Notebook)
+.PHONY: train-lstm-complete quick-lstm-complete validate-lstm-complete
+
+train-lstm-complete:
+	@echo "🧠 LSTM Complete Pipeline PRODUÇÃO com $(SYMBOL) $(TIMEFRAME)..."
+	$(PYTHON) -m src.models.lstm.complete_pipeline --config configs/lstm.yaml --symbol $(SYMBOL) --timeframe $(TIMEFRAME) --trials 30 --epochs 50
+
+quick-lstm-complete:
+	@echo "⚡ Demo rápida LSTM Complete Pipeline..."
+	$(PYTHON) -m src.models.lstm.complete_pipeline --config configs/lstm.yaml --symbol $(SYMBOL) --timeframe $(TIMEFRAME) --trials 3 --epochs 5 --quick
+
+validate-lstm-complete:
+	@echo "🧪 Validação LSTM Complete Pipeline..."
+	$(PYTHON) -m src.models.lstm.complete_pipeline --config configs/lstm.yaml --validate
+
+# Enhanced Features Validation
+.PHONY: validate-features test-adaptive-labeling test-volatility-features
+
+validate-features:
+	@echo "✅ Validando todas as features migradas..."
+	$(PYTHON) -m pytest tests/unit/test_features/ -v --tb=short
+
+test-adaptive-labeling:
+	@echo "🎯 Testando Adaptive Labeling..."
+	$(PYTHON) -m pytest tests/unit/test_features/test_adaptive_labeling.py -v
+
+test-volatility-features:
+	@echo "📊 Testando Enhanced Volatility Features..."
+	$(PYTHON) -m pytest tests/unit/test_features/test_volatility_features.py -v
 
 # Dashboard e Visualização
 .PHONY: dashboard mlflow-ui
@@ -144,9 +189,9 @@ help:
 	@echo "  make setup          - Configurar ambiente"
 	@echo "  make deterministic  - Configurar determinismo"
 	@echo ""
-	@echo "🎯 Treinamento:"
-	@echo "  make train-xgb      - Treinar XGBoost"
-	@echo "  make train-lstm     - Treinar LSTM"
+	@echo "🎯 Treinamento Tradicional:"
+	@echo "  make train-xgb      - Treinar XGBoost (com configs)"
+	@echo "  make train-lstm     - Treinar LSTM (com configs)"
 	@echo "  make train-both     - Treinar ambos modelos"
 	@echo "  make quick-test     - Teste rápido"
 	@echo ""
@@ -154,6 +199,21 @@ help:
 	@echo "  make quick-notebook     - Demo rápida (5min)"
 	@echo "  make train-notebook     - Produção completa (30-60min)"
 	@echo "  make validate-notebook  - Testes de validação (15min)"
+	@echo ""
+	@echo "🎯 Multi-Horizon Pipeline (MIGRADO DO NOTEBOOK):"
+	@echo "  make quick-multi-horizon     - Demo rápida Multi-Horizon (10min)"
+	@echo "  make train-multi-horizon     - Produção Multi-Horizon (60-120min)"
+	@echo "  make validate-multi-horizon  - Validação Multi-Horizon (20min)"
+	@echo ""
+	@echo "🧠 LSTM Complete Pipeline (MIGRADO DO NOTEBOOK):"
+	@echo "  make quick-lstm-complete     - Demo rápida LSTM Complete (15min)"
+	@echo "  make train-lstm-complete     - Produção LSTM Complete (90-180min)"
+	@echo "  make validate-lstm-complete  - Validação LSTM Complete (30min)"
+	@echo ""
+	@echo "✅ Validação de Features (NOVO):"
+	@echo "  make validate-features       - Testar todas as features migradas"
+	@echo "  make test-adaptive-labeling  - Testar Adaptive Labeling"
+	@echo "  make test-volatility-features - Testar Enhanced Volatility"
 	@echo ""
 	@echo "📊 Visualização:"
 	@echo "  make dashboard      - Dashboard Streamlit"
@@ -171,10 +231,11 @@ help:
 	@echo "  make rollback-model MODEL_NAME=x            - Rollback de modelo"
 	@echo ""
 	@echo "💡 Exemplos:"
-	@echo "  make quick-notebook                                    # Demo rápida"
-	@echo "  make train-notebook SYMBOL=ETHUSDT TIMEFRAME=1h       # Produção ETHUSDT"
-	@echo "  make validate-notebook                                 # Validação completa"
-	@echo "  make train-xgb SYMBOL=ETHUSDT TIMEFRAME=1h            # XGBoost tradicional"
+	@echo "  make quick-multi-horizon                               # Demo Multi-Horizon (NOVO)"
+	@echo "  make train-multi-horizon SYMBOL=ETHUSDT TIMEFRAME=1h  # Multi-Horizon ETHUSDT"
+	@echo "  make quick-lstm-complete                               # Demo LSTM Complete (NOVO)"
+	@echo "  make validate-features                                 # Testar features migradas"
+	@echo "  make train-notebook SYMBOL=ETHUSDT TIMEFRAME=1h       # Pipeline Notebook"
 	@echo "  make promote-model MODEL_NAME=crypto_xgb VERSION=1     # MLOps"
 	@echo "  make security-audit                                    # Segurança"
 

@@ -402,3 +402,14 @@ class CryptoDataLoader:
         }
         
         return metrics
+
+
+# Backward compatibility alias
+class BinanceDataLoader(CryptoDataLoader):
+    """Alias for backward compatibility.
+
+    Older code imports `BinanceDataLoader` from this module. The implementation
+    was generalized to `CryptoDataLoader`; this class preserves the old name
+    without changing behavior.
+    """
+    pass

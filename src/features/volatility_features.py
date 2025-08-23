@@ -211,7 +211,7 @@ class VolatilityFeatures:
     def calculate_parkinson_volatility(self, df: pd.DataFrame, 
                                       periods: List[int] = None) -> pd.DataFrame:
         """
-        Calculate Parkinson volatility using high-low range.
+        Calculate Parkinson volatility using centralized estimator.
         
         Args:
             df: DataFrame with OHLC data
@@ -223,28 +223,14 @@ class VolatilityFeatures:
         periods = periods or [10, 20, 50]
         
         for period in periods:
-            # Protection against division by zero and log of values <= 0
-            hl_ratio_raw = df["high"] / df["low"]
-            hl_ratio = np.where(
-                hl_ratio_raw > 0,
-                np.log(np.maximum(hl_ratio_raw, 1.0001)),
-                0.0001
-            )
-            hl_series = pd.Series(hl_ratio, index=df.index)
-            
-            df[f"parkinson_vol_{period}"] = (
-                hl_series.rolling(period).apply(
-                    lambda x: np.sqrt(np.sum(x**2) / (4 * period * np.log(2)))
-                    if len(x) == period else np.nan
-                )
-            )
+            df[f"parkinson_vol_{period}"] = self.vol_estimators.parkinson(df, period)
         
         return df
     
     def calculate_garman_klass_volatility(self, df: pd.DataFrame,
                                          periods: List[int] = None) -> pd.DataFrame:
         """
-        Calculate Garman-Klass volatility.
+        Calculate Garman-Klass volatility using centralized estimator.
         
         Args:
             df: DataFrame with OHLC data
@@ -256,29 +242,7 @@ class VolatilityFeatures:
         periods = periods or [10, 20, 50]
         
         for period in periods:
-            # Protection for high/low ratio
-            hl_ratio = df["high"] / df["low"]
-            hl = np.where(
-                hl_ratio > 0,
-                np.log(np.maximum(hl_ratio, 1.0001)) ** 2,
-                0
-            )
-            
-            # Protection for close/open ratio
-            co_ratio = df["close"] / df["open"]
-            co = np.where(
-                co_ratio > 0,
-                np.log(np.maximum(co_ratio, 1.0001)) ** 2,
-                0
-            )
-            
-            hl_series = pd.Series(hl, index=df.index)
-            co_series = pd.Series(co, index=df.index)
-            
-            gk_val = (0.5 * hl_series.rolling(period).mean() - 
-                     (2 * np.log(2) - 1) * co_series.rolling(period).mean())
-            
-            df[f"gk_vol_{period}"] = np.sqrt(np.maximum(gk_val, 0))
+            df[f"gk_vol_{period}"] = self.vol_estimators.garman_klass(df, period)
         
         return df
     
@@ -304,8 +268,8 @@ class VolatilityFeatures:
         
         # Volatility momentum
         if "volatility_20" in df.columns:
-            df["vol_momentum_5"] = df["volatility_20"].pct_change(5)
-            df["vol_momentum_20"] = df["volatility_20"].pct_change(20)
+            df["vol_momentum_5"] = df["volatility_20"].pct_change(5, fill_method=None)
+            df["vol_momentum_20"] = df["volatility_20"].pct_change(20, fill_method=None)
         
         return df
     

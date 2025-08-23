@@ -4,6 +4,8 @@ import pandas as pd
 import numpy as np
 from typing import List
 
+from .validation import validate_inputs, validate_outputs, log_execution_time
+
 
 class PriceFeatures:
     """Calculate price and return-based features."""
@@ -17,6 +19,8 @@ class PriceFeatures:
         """
         self.lookback_periods = lookback_periods or [5, 10, 20, 50, 100, 200]
     
+    @validate_inputs(['close'], min_rows=2, validate_numeric=True)
+    @validate_outputs(['returns'])
     def calculate_returns(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Calculate various return metrics.
@@ -37,11 +41,12 @@ class PriceFeatures:
         
         # Returns for multiple periods
         for period in self.lookback_periods:
-            # Cumulative returns
-            df[f"returns_{period}"] = df["returns"].rolling(period).sum()
-            
-            # Momentum
-            df[f"momentum_{period}"] = df["close"] / df["close"].shift(period) - 1
+            if period <= len(df):
+                # Cumulative returns
+                df[f"returns_{period}"] = df["returns"].rolling(period).sum()
+                
+                # Momentum
+                df[f"momentum_{period}"] = df["close"] / df["close"].shift(period) - 1
         
         return df
     

@@ -1,0 +1,97 @@
+# Temporal Validation Configuration
+# This file defines the standard validation strategies for time series data
+
+# Default validation strategy
+default_strategy: purged_kfold
+
+# Purged K-Fold Configuration (Recommended Default)
+purged_kfold:
+  n_splits: 5
+  embargo: 10  # Number of bars to embargo between train and validation
+  purge: 5     # Number of bars to purge before validation
+  check_leakage: true
+  min_train_samples: 1000
+  min_test_samples: 200
+  time_resolution_minutes: 15  # For 15-minute bars
+
+# Walk-Forward Configuration
+walk_forward:
+  window_size: 252  # ~1 year of daily data or ~15 days of 15-min data
+  test_size: 63    # ~3 months of daily data or ~4 days of 15-min data
+  gap: 0           # Gap between train and test
+  max_splits: 10   # Maximum number of walk-forward windows
+
+# Expanding Window Configuration (Anchored Walk-Forward)
+expanding_window:
+  min_train_size: 252  # Minimum training window
+  test_size: 63       # Test window size
+  gap: 0              # Gap between train and test
+  max_splits: 10      # Maximum number of splits
+
+# Combinatorial Purged Cross-Validation (Advanced)
+combinatorial:
+  n_splits: 6         # Total number of groups
+  n_test_groups: 2    # Number of groups for testing in each fold
+  embargo: 10         # Embargo between groups
+
+# Validation Rules (CRITICAL - DO NOT DISABLE)
+validation_rules:
+  # NEVER set any of these to false in production!
+  enforce_temporal_order: true    # Data must be time-ordered
+  enforce_no_shuffle: true        # Prevent shuffling of time series
+  enforce_embargo: true           # Require embargo between splits
+  enforce_purging: true           # Require purging before validation
+  check_for_leakage: true        # Automatic leakage detection
+  
+# Leakage Detection Thresholds
+leakage_detection:
+  min_embargo_minutes: 150  # Minimum 2.5 hours between train/val
+  min_purge_minutes: 75     # Minimum 1.25 hours purge
+  allow_warnings: true      # Show warnings for minor violations
+  fail_on_leakage: true    # Fail validation if leakage detected
+
+# Strategy Selection by Data Size
+auto_strategy_selection:
+  small_data:  # < 5000 samples
+    strategy: purged_kfold
+    n_splits: 3
+  medium_data: # 5000-50000 samples
+    strategy: purged_kfold
+    n_splits: 5
+  large_data:  # > 50000 samples
+    strategy: walk_forward
+    n_windows: 10
+
+# Model-Specific Overrides
+model_overrides:
+  xgboost:
+    embargo: 10
+    purge: 5
+  lstm:
+    embargo: 20  # LSTMs need larger embargo due to sequence dependencies
+    purge: 10
+  ensemble:
+    embargo: 15
+    purge: 8
+
+# Production Settings
+production:
+  strategy: walk_forward  # Always use walk-forward in production
+  retrain_frequency: 100  # Retrain every 100 bars
+  embargo: 20            # Conservative embargo for production
+  purge: 10              # Conservative purge for production
+  validate_before_deploy: true
+  min_validation_score: 0.6  # Minimum score to deploy model
+
+# Backtesting Settings
+backtesting:
+  use_combinatorial: false  # Too expensive for regular backtests
+  use_walk_forward: true    # Most realistic for backtesting
+  embargo_multiplier: 1.5   # Extra conservative for backtests
+
+# Debug Settings (DEV ONLY - NEVER USE IN PRODUCTION)
+debug:
+  disable_checks: false  # NEVER set to true in production
+  allow_shuffle: false   # NEVER set to true for time series
+  skip_embargo: false    # NEVER set to true in production
+  verbose_logging: true  # Detailed logging for debugging

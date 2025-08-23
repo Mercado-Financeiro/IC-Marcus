@@ -1,0 +1,4 @@
+# file: /home/marcux777/Projeto_IC/src/features/price_features.py
+# hypothesis_version: 6.138.2
+
+[1e-10, 100, 200, 'close', 'ema_12', 'ema_26', 'ema_cross_12_26', 'returns', 'sma_100', 'sma_20', 'sma_50', 'sma_cross_20_50', 'sma_cross_50_100']
