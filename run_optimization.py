@@ -156,11 +156,16 @@ class OptimizationPipeline:
         # Labeling direcional simples para criptomoedas (subir/descer)
         # Removido Triple Barrier - usando apenas direção do preço
         labels_config = data_config.get('labels', {})
-        
+
         # Configuração de labeling direcional
         horizon_minutes = labels_config.get('horizon_minutes', 15)
         min_return_threshold = labels_config.get('min_return_threshold', 0.0)  # Threshold mínimo
         
+        # Configurações de trading (para threshold baseado em lucro)
+        trading_config = data_config.get('trading', {})
+        cost_per_trade = trading_config.get('costs', {}).get('cost_per_trade', 0.002)
+        win_return = trading_config.get('returns', {}).get('win_return', 0.015)
+
         # Calcular retorno futuro baseado no horizonte
         if horizon_minutes == 15:  # 1 barra de 15min
             future_returns = df['returns'].shift(-1)
@@ -174,10 +179,10 @@ class OptimizationPipeline:
             # Calcular dinamicamente baseado no timeframe
             bars_ahead = int(horizon_minutes / 15)  # Assumindo timeframe de 15min
             future_returns = (df['close'].shift(-bars_ahead) / df['close'] - 1)
-        
+
         # Criar labels binários (subir=1, descer=0)
         df['label'] = (future_returns > min_return_threshold).astype(int)
-        
+
         # Sample weights baseados na volatilidade (opcional)
         if labels_config.get('use_volatility_weights', False):
             # Usar ATR para ponderar amostras mais voláteis
@@ -185,7 +190,7 @@ class OptimizationPipeline:
                 df['atr_14'] = ta.volatility.AverageTrueRange(
                     df['high'], df['low'], df['close'], window=14
                 ).average_true_range()
-            
+
             # Normalizar ATR para sample weights
             atr_normalized = df['atr_14'] / df['atr_14'].mean()
             sample_weights = np.clip(atr_normalized, 0.5, 2.0)  # Limitar entre 0.5 e 2.0
@@ -197,7 +202,7 @@ class OptimizationPipeline:
         total_samples = len(df)
         up_count = label_distribution.get(1, 0)
         down_count = label_distribution.get(0, 0)
-        
+
         print(f"\n📊 Labeling Direcional (Subir/Descer):")
         print(f"  • Horizonte: {horizon_minutes} minutos")
         print(f"  • Threshold mínimo: {min_return_threshold:.4f}")
@@ -302,12 +307,34 @@ class OptimizationPipeline:
         y_pred_proba = xgb_opt.predict_proba(data['X_test'])
         y_pred = xgb_opt.predict(data['X_test'])
 
+        # Métricas ML tradicionais
         metrics = self._calculate_metrics(data['y_test'], y_pred, y_pred_proba)
         metrics['threshold_f1'] = xgb_opt.threshold_f1
         metrics['threshold_ev'] = xgb_opt.threshold_ev
+        metrics['threshold_profit'] = xgb_opt.threshold_profit
+
+        # Métricas de trading baseadas em lucro (mais realistas)
+        trading_metrics = xgb_opt.calculate_trading_metrics(
+            data['X_test'], 
+            data['y_test'],
+            cost_per_trade=cost_per_trade,
+            win_return=win_return
+        )
 
         # Backtest com thresholds otimizados
         backtest_metrics = self._run_backtest(data['df'], data['X_test'], y_pred, y_pred_proba)
+
+        # Mostrar métricas de trading
+        print(f"\n💰 Métricas de Trading (Baseadas em Lucro):")
+        print(f"  • Threshold Ótimo: {trading_metrics['threshold_profit']:.4f}")
+        print(f"  • Total de Trades: {trading_metrics['total_trades']}")
+        print(f"  • Win Rate: {trading_metrics['win_rate']:.2%}")
+        print(f"  • Lucro Bruto: {trading_metrics['gross_profit']:.4f}")
+        print(f"  • Custo Total: {trading_metrics['total_cost']:.4f}")
+        print(f"  • Lucro Líquido: {trading_metrics['net_profit']:.4f}")
+        print(f"  • ROI: {trading_metrics['roi']:.2%}")
+        print(f"  • Profit Factor: {trading_metrics['profit_factor']:.2f}")
+        print(f"  • EV por Trade: {trading_metrics['ev_per_trade']:.4f}")
 
         # Salvar modelo
         if not self.quick_mode:

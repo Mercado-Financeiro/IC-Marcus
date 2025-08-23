@@ -8,12 +8,12 @@ data:
   start_date: "2020-01-01"
   end_date: "2024-12-31"
   timezone: "UTC"  # timezone-aware obrigatório
-  
+
 # Unidades padronizadas
 units:
   returns: "log"    # log returns
   costs: "bps"      # basis points
-  
+
 # Configurações de cache
 cache:
   enabled: true
@@ -25,7 +25,7 @@ cache:
 features:
   # Períodos básicos para indicadores
   lookback_periods: [5, 10, 20, 50, 100, 200]
-  
+
   # Features de preço
   price_features:
     - returns
@@ -33,7 +33,7 @@ features:
     - realized_volatility
     - price_momentum
     - price_acceleration
-    
+
   # Indicadores técnicos
   technical_indicators:
     rsi:
@@ -50,7 +50,7 @@ features:
     stochastic:
       k_period: 14
       d_period: 3
-      
+
   # Features avançadas (PRDs)
   microstructure:
     enabled: true
@@ -60,7 +60,7 @@ features:
       - kyle_lambda
       - roll_measure
       - amihud_illiquidity
-      
+
   derivatives:
     enabled: true
     features:
@@ -68,40 +68,59 @@ features:
       - open_interest_ratio
       - liquidation_levels
       - basis_spread
-      
+
 # Labeling
 labels:
   method: "directional"  # Direcional simples (subir/descer)
   horizon_minutes: 15    # Horizonte de predição em minutos
-  
+
   # Configurações de labeling direcional
   directional:
     min_return_threshold: 0.0  # Threshold mínimo para considerar "subir" (0 = qualquer movimento positivo)
     use_volatility_weights: false  # Se True, usa ATR para sample weights
-    
+
   # Configurações por timeframe
   horizons:
     "5m": 15    # 3 barras de 5min
     "15m": 15   # 1 barra de 15min
     "1h": 60    # 1 barra de 1h
     "4h": 240   # 1 barra de 4h
-    
+
+# Configurações de Trading (para threshold baseado em lucro)
+trading:
+  # Custos de transação (realistas para criptomoedas)
+  costs:
+    fee_bps: 10        # 0.1% fee (Binance spot)
+    slippage_bps: 10   # 0.1% slippage estimado
+    cost_per_trade: 0.002  # 0.2% total (fee + slippage)
+
+  # Retornos esperados
+  returns:
+    win_return: 0.015      # 1.5% retorno médio por trade correto
+    loss_return: 0.010     # 1.0% perda média por trade incorreto
+
+  # Configurações de threshold
+  threshold:
+    min_threshold: 0.1     # Threshold mínimo para testar
+    max_threshold: 0.9     # Threshold máximo para testar
+    n_thresholds: 100      # Número de thresholds para testar
+
 # Splits temporais
 split:
   method: "purged_kfold"
   test_size: 0.2
   val_size: 0.2
-  
+
   # Purged K-Fold
   purged_kfold:
     n_splits: 5
     embargo: 10  # barras de embargo
-    
+
   # Walk Forward (alternativo)
   walk_forward:
     n_splits: 5
     gap: 5       # gap entre treino e validação
-    
+
 # Validação de schemas
 schema:
   validate_on_load: true
@@ -114,7 +133,7 @@ performance:
   chunk_size: 10000
   parallel_processing: true
   n_jobs: -1  # Usar todos os cores disponíveis
-  
+
 # Logging
 logging:
   level: "INFO"
