@@ -273,7 +273,7 @@ class BacktestEngine:
                             realized_pnl = position * (execution_price - entry_price)
                         else:
                             realized_pnl = -position * (execution_price - entry_price)
-                        equity += realized_pnl
+                        # equity += realized_pnl # This was double-counting P&L
                     
                     # Open new position
                     if prev_signal != 0:

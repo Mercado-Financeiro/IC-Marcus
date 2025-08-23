@@ -31,7 +31,7 @@ BarsSchema = DataFrameSchema(
 )
 
 
-class BinanceDataLoader:
+class CryptoDataLoader:
     """Loader de dados de criptomoedas com cache e fallback."""
 
     def __init__(

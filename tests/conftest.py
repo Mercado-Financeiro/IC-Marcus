@@ -194,3 +194,61 @@ try:
     settings.load_profile("dev")
 except ImportError:
     pass  # Hypothesis is optional
+
+
+@pytest.fixture
+def lstm_config():
+    """Create LSTM configuration for testing."""
+    from src.models.lstm.optuna import LSTMOptunaConfig
+    
+    return LSTMOptunaConfig(
+        n_trials=2,  # Small for testing
+        cv_folds=2,
+        max_epochs=5,
+        batch_size=32,
+        seq_len_min=5,
+        seq_len_max=10,
+        hidden_size_min=16,
+        hidden_size_max=32,
+        device='cpu'  # Use CPU for tests
+    )
+
+
+@pytest.fixture
+def sample_sequences():
+    """Create sample sequences for LSTM testing."""
+    np.random.seed(42)
+    batch_size = 32
+    seq_len = 10
+    n_features = 5
+    
+    X = np.random.randn(batch_size, seq_len, n_features)
+    y = np.random.randint(0, 2, batch_size)
+    
+    return X, y
+
+
+@pytest.fixture
+def torch_device():
+    """Get PyTorch device for testing."""
+    import torch
+    return torch.device('cpu')
+
+
+@pytest.fixture
+def ensemble_models():
+    """Create sample models for ensemble testing."""
+    models = {}
+    
+    for i in range(3):
+        model = type('MockModel', (), {
+            'fit': lambda self, X, y: self,
+            'predict': lambda self, X: np.random.randint(0, 2, len(X)),
+            'predict_proba': lambda self, X: np.column_stack([
+                np.random.rand(len(X)), 
+                np.random.rand(len(X))
+            ])
+        })()
+        models[f'model_{i}'] = model
+    
+    return models

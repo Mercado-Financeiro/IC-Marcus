@@ -145,8 +145,12 @@ def load_model(model_path: str):
 def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
     """Simple token verification (implement properly for production)."""
     token = credentials.credentials
-    # TODO: Implement proper token verification
-    if token != "demo-token":
+    # --- SECURITY WARNING ---
+    # Hardcoded tokens are a major security risk.
+    # In production, use a secure method like OAuth2 and load secrets
+    # from environment variables or a secret management system.
+    # Example: API_TOKEN = os.getenv("API_TOKEN")
+    if token != "demo-token": # Replace with your actual token logic
         raise HTTPException(status_code=403, detail="Invalid token")
     return token
 

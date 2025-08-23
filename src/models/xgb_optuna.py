@@ -513,50 +513,59 @@ class XGBoostOptuna:
 
     def fit_final_model(
         self,
-        X: pd.DataFrame,
-        y: pd.Series,
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        X_val: pd.DataFrame,
+        y_val: pd.Series,
         sample_weights: Optional[np.ndarray] = None
     ) -> Any:
-        """Fit final model with best parameters.
+        """Fit final model with best parameters using PROPER validation split.
+        
+        CRITICAL: Calibration and threshold optimization done on VALIDATION set,
+        never on training set to prevent data leakage.
 
         Args:
-            X: Features
-            y: Labels
-            sample_weights: Optional sample weights
+            X_train: Training features
+            y_train: Training labels
+            X_val: Validation features  
+            y_val: Validation labels
+            sample_weights: Optional sample weights for training
 
         Returns:
-            Fitted model
+            Fitted model (uncalibrated base model)
         """
         if self.best_params is None:
             raise ValueError("No best parameters found. Run optimize first.")
 
-        # Prepare parameters (keep same API as optimization)
+        # Prepare parameters
         params = self.best_params.copy()
         params.update({
             'tree_method': 'hist',
             'objective': 'binary:logistic',
-            'eval_metric': 'aucpr',  # Consistent with optimization
+            'eval_metric': 'aucpr',
             'random_state': self.seed,
             'verbosity': 0,
             'n_jobs': -1
         })
 
-        # Use consistent scale_pos_weight calculation
-        params['scale_pos_weight'] = self._calculate_scale_pos_weight(y)
+        # Use consistent scale_pos_weight calculation on TRAINING data
+        params['scale_pos_weight'] = self._calculate_scale_pos_weight(y_train)
 
-        # Train model on all data (no early stopping for final model)
+        # Train model on TRAINING data only
         model = xgb.XGBClassifier(**params)
-        model.fit(X, y, sample_weight=sample_weights, verbose=False)
+        model.fit(X_train, y_train, sample_weight=sample_weights, verbose=False)
 
-        # Calibrate (mandatory)
+        # CRITICAL: Calibrate using validation data (prefit=True)
         self.calibrator = CalibratedClassifierCV(
-            model, method='isotonic', cv=3
+            model, method='isotonic', cv='prefit'
         )
-        self.calibrator.fit(X, y)
+        # Fit calibrator on VALIDATION set only
+        self.calibrator.fit(X_val, y_val)
 
-        # Calculate thresholds
-        y_pred_proba = self.calibrator.predict_proba(X)[:, 1]
-        self.threshold_f1 = self._optimize_threshold_f1(y, y_pred_proba)
+        # CRITICAL: Calculate thresholds using VALIDATION data only
+        y_val_pred_proba = self.calibrator.predict_proba(X_val)[:, 1]
+        
+        self.threshold_f1 = self._optimize_threshold_f1(y_val, y_val_pred_proba)
 
         # Configurações de custos para criptomoedas (realistas)
         cost_per_trade = 0.002  # 0.2% (0.1% fee + 0.1% slippage)
@@ -564,29 +573,42 @@ class XGBoostOptuna:
 
         # Novo threshold baseado em lucro (mais realista)
         self.threshold_profit = self._optimize_threshold_profit(
-            y, y_pred_proba,
+            y_val, y_val_pred_proba,
             cost_per_trade=cost_per_trade,
             win_return=win_return
         )
 
-        # Threshold EV legado (mantido para compatibilidade)
-        costs = {'fee_bps': 5, 'slippage_bps': 5}  # Default costs
-        self.threshold_ev = self._optimize_threshold_ev(y, y_pred_proba, costs)
+        # Threshold EV usando validation
+        costs = {'fee_bps': 5, 'slippage_bps': 5}
+        self.threshold_ev = self._optimize_threshold_ev(y_val, y_val_pred_proba, costs)
 
         self.log.info(
-            "final_model_fitted",
+            "final_model_fitted_PROPERLY",
             threshold_f1=self.threshold_f1,
-            threshold_profit=self.threshold_profit,
+            threshold_profit=self.threshold_profit, 
             threshold_ev=self.threshold_ev,
+            calibration_on="validation_set",  # CRITICAL LOG
+            threshold_on="validation_set",    # CRITICAL LOG
             cost_per_trade=cost_per_trade,
             win_return=win_return
         )
 
         return model
 
-    def train_final_model(self, X: pd.DataFrame, y: pd.Series, sample_weights: Optional[np.ndarray] = None) -> Any:
-        """Alias for fit_final_model to match expected interface."""
-        return self.fit_final_model(X, y, sample_weights)
+    def train_final_model(
+        self,
+        X_train: pd.DataFrame,
+        y_train: pd.Series, 
+        X_val: pd.DataFrame,
+        y_val: pd.Series,
+        sample_weights: Optional[np.ndarray] = None
+    ) -> Any:
+        """Alias for fit_final_model to match expected interface.
+        
+        DEPRECATED: This method signature is being updated to enforce proper
+        train/validation split for calibration and threshold optimization.
+        """
+        return self.fit_final_model(X_train, y_train, X_val, y_val, sample_weights)
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         """Predict probabilities with calibrated model.

@@ -1,0 +1,237 @@
+# Configuração de Monitoramento MLOps
+
+# Métricas de Performance do Modelo
+model_metrics:
+  tracking_interval: 60  # segundos
+  metrics_to_track:
+    - f1_score
+    - precision
+    - recall
+    - sharpe_ratio
+    - max_drawdown
+    - win_rate
+    - profit_factor
+  
+  thresholds:
+    f1_score:
+      warning: 0.55
+      critical: 0.50
+    sharpe_ratio:
+      warning: 0.8
+      critical: 0.5
+    max_drawdown:
+      warning: -0.20
+      critical: -0.30
+
+# Monitoramento de Drift
+drift_monitoring:
+  check_interval: 3600  # 1 hora
+  metrics:
+    - psi  # Population Stability Index
+    - kl_divergence
+    - wasserstein_distance
+  
+  thresholds:
+    psi:
+      warning: 0.2
+      critical: 0.3
+    kl_divergence:
+      warning: 0.15
+      critical: 0.25
+    wasserstein_distance:
+      warning: 0.1
+      critical: 0.2
+  
+  feature_importance_shift:
+    threshold: 0.3
+    top_k_features: 10
+
+# Monitoramento de Sistema
+system_monitoring:
+  health_check:
+    interval: 30  # segundos
+    timeout: 10
+    endpoints:
+      - /health
+      - /ready
+      - /metrics
+  
+  resource_limits:
+    cpu_percent:
+      warning: 70
+      critical: 90
+    memory_percent:
+      warning: 75
+      critical: 95
+    disk_usage_percent:
+      warning: 80
+      critical: 95
+  
+  latency:
+    p50_ms: 50
+    p95_ms: 200
+    p99_ms: 500
+
+# Alertas
+alerting:
+  enabled: true
+  
+  channels:
+    email:
+      enabled: false
+      smtp_server: smtp.gmail.com
+      smtp_port: 587
+      from_address: alerts@crypto-ml.com
+      to_addresses:
+        - team@crypto-ml.com
+    
+    slack:
+      enabled: false
+      webhook_url: ${SLACK_WEBHOOK_URL}
+      channel: '#ml-alerts'
+    
+    pagerduty:
+      enabled: false
+      integration_key: ${PAGERDUTY_KEY}
+  
+  rules:
+    - name: model_performance_degradation
+      condition: "f1_score < 0.50 OR sharpe_ratio < 0.5"
+      severity: critical
+      channels: [email, slack, pagerduty]
+    
+    - name: high_drift_detected
+      condition: "psi > 0.3 OR kl_divergence > 0.25"
+      severity: warning
+      channels: [email, slack]
+    
+    - name: system_resource_critical
+      condition: "cpu_percent > 90 OR memory_percent > 95"
+      severity: critical
+      channels: [pagerduty]
+    
+    - name: high_latency
+      condition: "p99_latency_ms > 500"
+      severity: warning
+      channels: [slack]
+
+# Logging
+logging:
+  level: INFO
+  format: json
+  
+  outputs:
+    - type: file
+      path: /app/logs/monitoring.log
+      max_size_mb: 100
+      max_backups: 10
+    
+    - type: stdout
+      format: pretty  # for development
+  
+  structured_fields:
+    - timestamp
+    - level
+    - message
+    - model_name
+    - model_version
+    - environment
+    - metrics
+
+# Dashboards
+dashboards:
+  grafana:
+    enabled: true
+    datasources:
+      - prometheus
+      - postgres
+    
+    panels:
+      - model_performance
+      - drift_metrics
+      - system_resources
+      - prediction_distribution
+      - feature_importance
+      - business_metrics
+  
+  custom_metrics:
+    - name: daily_profit
+      query: "sum(profit) by (day)"
+    - name: prediction_volume
+      query: "count(predictions) by (hour)"
+    - name: model_confidence
+      query: "histogram_quantile(0.95, prediction_confidence)"
+
+# Data Quality
+data_quality:
+  validation_rules:
+    - name: completeness
+      check: "null_count < 0.01"
+    - name: uniqueness
+      check: "duplicate_count = 0"
+    - name: timeliness
+      check: "max_timestamp - now() < 1h"
+    - name: consistency
+      check: "schema_matches_expected"
+  
+  anomaly_detection:
+    enabled: true
+    methods:
+      - isolation_forest
+      - local_outlier_factor
+    contamination: 0.01
+
+# Retraining Triggers
+retraining:
+  auto_trigger:
+    enabled: true
+    conditions:
+      - drift_score > 0.3
+      - performance_degradation > 0.2
+      - days_since_last_training > 30
+      - new_data_samples > 100000
+  
+  validation:
+    min_improvement: 0.05
+    test_size: 0.2
+    cv_folds: 5
+
+# Security Monitoring
+security:
+  api_rate_limiting:
+    enabled: true
+    requests_per_minute: 100
+    requests_per_hour: 5000
+  
+  authentication:
+    required: true
+    methods: [api_key, jwt]
+  
+  audit_logging:
+    enabled: true
+    log_predictions: false  # GDPR compliance
+    log_model_updates: true
+    retention_days: 90
+
+# Backup and Recovery
+backup:
+  enabled: true
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  
+  targets:
+    models:
+      path: /app/artifacts/models
+      retention_days: 30
+    
+    mlflow:
+      path: /app/mlflow
+      retention_days: 90
+    
+    configs:
+      path: /app/configs
+      retention_days: 365
+  
+  s3:
+    enabled: false
+    bucket: ${S3_BACKUP_BUCKET}
+    region: us-east-1

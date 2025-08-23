@@ -19,6 +19,7 @@
 # Standard Library
 import os
 import sys
+import gc
 import json
 import pickle
 import random
@@ -46,7 +47,7 @@ from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, average_precision_score, matthews_corrcoef,
     confusion_matrix, classification_report, roc_curve,
-    precision_recall_curve, brier_score_loss
+    precision_recall_curve, brier_score_loss, balanced_accuracy_score
 )
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.datasets import make_classification
@@ -60,15 +61,28 @@ except ImportError:
     print("⚠️ XGBoost não disponível")
 
 # Optuna
+OPTUNA_AVAILABLE = False
+OPTUNA_XGBOOST_INTEGRATION = False
+
 try:
     import optuna
     from optuna.pruners import MedianPruner, SuccessiveHalvingPruner, HyperbandPruner
     from optuna.samplers import TPESampler
-    from optuna.integration import XGBoostPruningCallback
     OPTUNA_AVAILABLE = True
-except ImportError:
-    OPTUNA_AVAILABLE = False
-    print("⚠️ Optuna não disponível")
+    print("✅ Optuna core disponível")
+    
+    # Tentar carregar integração XGBoost separadamente
+    try:
+        from optuna.integration import XGBoostPruningCallback
+        OPTUNA_XGBOOST_INTEGRATION = True
+        print("✅ Optuna XGBoost integration disponível")
+    except ImportError as e:
+        print(f"⚠️ Optuna XGBoost integration não disponível: {e}")
+        print("   Pipeline continuará com otimização básica")
+        
+except ImportError as e:
+    print(f"⚠️ Optuna não disponível: {e}")
+    print("   Pipeline continuará com hiperparâmetros padrão")
 
 # Deep Learning - PyTorch
 try:
@@ -153,7 +167,7 @@ except ImportError:
 
 # Imports locais do projeto (quando disponíveis)
 try:
-    from src.data.loader import BinanceDataLoader
+    from src.data.binance_loader import CryptoDataLoader
     from src.data.splits import PurgedKFold as ImportedPurgedKFold
     from src.features.engineering import FeatureEngineer as BaseFeatureEngineer
     from src.models.xgb_optuna import XGBoostOptuna as ImportedXGBoostOptuna
@@ -173,7 +187,77 @@ pd.set_option('display.float_format', '{:.6f}'.format)
 print("✅ Imports concluídos com sucesso!")
 
 # %% [markdown]
-# ## 2. Configuração Determinística do Ambiente
+# ## 2. Fallbacks para Bibliotecas Opcionais
+
+# %%
+class FallbackPruningCallback:
+    """Fallback para XGBoostPruningCallback quando optuna-integration não disponível"""
+    def __init__(self, trial, metric_name):
+        self.trial = trial
+        self.metric_name = metric_name
+        
+    def __call__(self, env):
+        """Callback compatível com XGBoost"""
+        # Extrair métrica de validação
+        if hasattr(env, 'evaluation_result_list') and env.evaluation_result_list:
+            # Formato: [('validation_0', 'aucpr', value)]
+            for eval_name, metric, value in env.evaluation_result_list:
+                if metric in self.metric_name or self.metric_name in metric:
+                    self.trial.report(value, env.iteration)
+                    if self.trial.should_prune():
+                        raise optuna.TrialPruned()
+        return False
+
+def create_xgb_pruning_callback(trial, metric_name):
+    """Factory function para criar callback apropriado"""
+    if OPTUNA_XGBOOST_INTEGRATION:
+        from optuna.integration import XGBoostPruningCallback
+        return XGBoostPruningCallback(trial, metric_name)
+    elif OPTUNA_AVAILABLE:
+        return FallbackPruningCallback(trial, metric_name)
+    else:
+        # Retorna callback dummy que não faz nada
+        return lambda env: False
+
+def safe_optuna_study(direction='maximize', sampler=None, pruner=None):
+    """Criar study do Optuna com fallbacks"""
+    if OPTUNA_AVAILABLE:
+        return optuna.create_study(
+            direction=direction,
+            sampler=sampler or optuna.samplers.TPESampler(seed=42),
+            pruner=pruner or optuna.pruners.MedianPruner()
+        )
+    else:
+        # Fallback: usar grid search simples
+        print("⚠️ Usando grid search básico no lugar do Optuna")
+        return None
+
+def safe_mlflow_log(func_name, *args, **kwargs):
+    """Helper para fazer log no MLflow de forma segura"""
+    if MLFLOW_AVAILABLE:
+        import mlflow
+        func = getattr(mlflow, func_name)
+        return func(*args, **kwargs)
+    return None
+
+def safe_mlflow_start_run(**kwargs):
+    """Helper para iniciar run do MLflow de forma segura"""
+    if MLFLOW_AVAILABLE:
+        import mlflow
+        return mlflow.start_run(**kwargs)
+    return None
+
+def safe_mlflow_end_run():
+    """Helper para finalizar run do MLflow de forma segura"""
+    if MLFLOW_AVAILABLE:
+        import mlflow
+        return mlflow.end_run()
+    return None
+
+print("✅ Fallbacks configurados!")
+
+# %% [markdown]
+# ## 3. Configuração Determinística do Ambiente
 
 # %%
 def setup_deterministic_environment(seed: int = 42):
@@ -226,6 +310,8 @@ GLOBAL_SEED = setup_deterministic_environment(42)
 # ## 3. Configurações Globais do Projeto
 
 # %%
+from dataclasses import dataclass, field
+
 @dataclass
 class ProjectConfig:
     """Configurações globais do projeto"""
@@ -242,6 +328,21 @@ class ProjectConfig:
     timeframe: str = "15m"
     start_date: str = "2023-01-01"
     end_date: str = "2024-01-01"
+    
+    # Funding periods por símbolo (em minutos)
+    # Fonte: https://www.binance.com/en/support/faq/detail/360033525031
+    # Padrão: 480 min (8h) para maioria dos contratos perpétuos
+    # Alguns contratos específicos usam 60 min (1h) ou 240 min (4h)
+    FUNDING_MIN_BY_SYMBOL: Dict[str, int] = field(default_factory=lambda: {
+        "BTCUSDT": 480,    # 8 horas
+        "ETHUSDT": 480,    # 8 horas  
+        "BNBUSDT": 480,    # 8 horas
+        "SOLUSDT": 480,    # 8 horas
+        "XRPUSDT": 480,    # 8 horas
+        "ADAUSDT": 480,    # 8 horas
+        # Adicionar outros símbolos conforme necessário
+        # Alguns contratos exóticos podem ter 60 ou 240 minutos
+    })
     
     # Horizontes de predição (em barras de 15min)
     horizons: Dict[str, int] = None
@@ -302,6 +403,7 @@ config.create_directories()
 
 # Configurar MLflow
 if MLFLOW_AVAILABLE:
+    import mlflow
     mlflow.set_tracking_uri(config.mlflow_tracking_uri)
     mlflow.set_experiment(config.experiment_name)
     print(f"✅ MLflow configurado: {config.mlflow_tracking_uri}")
@@ -347,7 +449,9 @@ class VolatilityEstimators:
             (2 * np.log(2) - 1) * log_co**2
         )
         
-        return gk.rolling(window=window).mean()
+        # Normalizar para escala comparável ao ATR (retorno fracionário)
+        gk_mean = gk.rolling(window=window).mean()
+        return gk_mean.clip(lower=1e-8)  # Evitar divisão por zero
     
     @staticmethod  
     def yang_zhang(df: pd.DataFrame, window: int = 14) -> pd.Series:
@@ -381,8 +485,9 @@ class VolatilityEstimators:
         k = 0.34 / (1.34 + (window + 1) / (window - 1))
         yz = np.sqrt(vol_overnight + k * vol_cc + (1 - k) * vol_rs)
         
-        # Já está em escala de retorno (log), manter consistente
-        return yz
+        # Normalizar para escala comparável (retorno fracionário)
+        # Yang-Zhang já está em escala de log-retorno, clipar para evitar zero
+        return yz.clip(lower=1e-8)
     
     @staticmethod
     def parkinson(df: pd.DataFrame, window: int = 14) -> pd.Series:
@@ -393,7 +498,9 @@ class VolatilityEstimators:
         log_hl = np.log(df['high'] / df['low'])
         park = log_hl / (2 * np.sqrt(np.log(2)))
         
-        return park.rolling(window=window).mean()
+        # Normalizar para escala comparável (retorno fracionário)
+        park_mean = park.rolling(window=window).mean()
+        return park_mean.clip(lower=1e-8)  # Evitar divisão por zero
     
     @staticmethod
     def realized_volatility(df: pd.DataFrame, window: int = 14) -> pd.Series:
@@ -542,9 +649,7 @@ class AdaptiveLabeler:
         Returns:
             float: k ótimo para o horizonte
         """
-        from sklearn.model_selection import TimeSeriesSplit
-        from sklearn.ensemble import RandomForestClassifier
-        from sklearn.metrics import f1_score, average_precision_score
+        # Imports já feitos no início do arquivo, não precisam ser repetidos
         
         # Configurar horizonte
         self.horizon_bars = self.horizon_map[horizon]
@@ -650,9 +755,7 @@ class AdaptiveLabeler:
         Returns:
             float: k ótimo
         """
-        from sklearn.model_selection import TimeSeriesSplit
-        from sklearn.ensemble import RandomForestClassifier
-        from sklearn.metrics import f1_score, balanced_accuracy_score
+        # Imports já feitos no início do arquivo, não precisam ser repetidos
         
         best_k = self.k
         best_score = -np.inf
@@ -711,6 +814,53 @@ print("✅ Classe AdaptiveLabeler definida")
 # ## 6. Features para Mercado Cripto 24/7
 
 # %%
+# Resolver dinâmico de funding period
+def resolve_funding_minutes(symbol: str, timestamp: pd.Timestamp = None) -> int:
+    """
+    Resolve o período de funding dinamicamente baseado no símbolo e data.
+    
+    Regras (fonte: Binance Support):
+    - Padrão: 480 min (8 horas) para maioria dos contratos perpétuos
+    - Condicional: 60 min (1 hora) quando funding rate atinge cap/floor
+    - Especial: Alguns contratos podem ter 240 min (4 horas)
+    
+    Args:
+        symbol: Símbolo do contrato (ex: BTCUSDT)
+        timestamp: Data/hora para verificar regras específicas do período
+        
+    Returns:
+        Período de funding em minutos
+    """
+    # Dicionário base de funding por símbolo
+    # Fonte: https://www.binance.com/en/support/faq/detail/360033525031
+    FUNDING_PERIODS = {
+        # Majors - 8 horas padrão
+        "BTCUSDT": 480,
+        "ETHUSDT": 480,
+        "BNBUSDT": 480,
+        "XRPUSDT": 480,
+        "ADAUSDT": 480,
+        "SOLUSDT": 480,
+        "DOTUSDT": 480,
+        "DOGEUSDT": 480,
+        
+        # Contratos com período especial (exemplos)
+        # Adicionar conforme documentação da exchange
+    }
+    
+    # Obter período base do símbolo
+    base_period = FUNDING_PERIODS.get(symbol, 480)  # Default 8h
+    
+    # TODO: Implementar lógica condicional
+    # Se funding rate atingir cap/floor, pode mudar para 1h temporariamente
+    # Isso requer acesso ao funding rate atual da exchange
+    
+    # Log da decisão
+    if timestamp:
+        print(f"📊 Funding period para {symbol} em {timestamp}: {base_period} min ({base_period/60:.1f}h)")
+    
+    return base_period
+
 class Crypto24x7Features:
     """
     Features específicas para mercado cripto 24/7
@@ -793,12 +943,12 @@ class Crypto24x7Features:
     @staticmethod
     def create_funding_features(df: pd.DataFrame, 
                                features: pd.DataFrame = None,
-                               funding_period_minutes: int = 60) -> pd.DataFrame:
+                               funding_period_minutes: int = 480) -> pd.DataFrame:
         """
         Features relacionadas ao funding rate (perpetual futures)
         
-        ATUALIZAÇÃO 2025: Binance mudou para liquidação por hora
-        Default agora é 60 minutos, mas parametrizado por símbolo
+        Default é 480 minutos (8 horas) - padrão da maioria dos contratos perpetuais
+        Alguns contratos específicos usam 60 minutos (1 hora) - ajustar por símbolo
         """
         if features is None:
             features = pd.DataFrame(index=df.index)
@@ -832,8 +982,9 @@ class Crypto24x7Features:
         # É hora de funding?
         features['is_funding_time'] = (features['minutes_to_funding'] == 0).astype(int)
         
-        # Janela pré-funding (1 hora antes)
-        features['pre_funding_window'] = (features['minutes_to_funding'] <= 60).astype(int)
+        # Janela pré-funding (proporção do período - 12.5% antes do funding)
+        pre_funding_minutes = min(60, funding_period_minutes // 8)  # Máximo 1 hora, ou 1/8 do período
+        features['pre_funding_window'] = (features['minutes_to_funding'] <= pre_funding_minutes).astype(int)
         
         # Ciclo de funding (qual período estamos)
         features['funding_cycle'] = (minutes_in_day // funding_period_minutes).astype(int)
@@ -853,7 +1004,7 @@ def run_multi_horizon_pipeline(df: pd.DataFrame,
                               horizons: List[str] = ['15m', '30m', '60m', '120m'],
                               test_size: float = 0.2,
                               val_size: float = 0.2,
-                              n_trials: int = 50,
+                              n_trials: int = 20,  # Reduzido para otimização de memória
                               k_range: Tuple[float, float] = (0.5, 2.0)) -> Dict:
     """
     Pipeline completo para treinar e avaliar modelos em múltiplos horizontes
@@ -877,16 +1028,25 @@ def run_multi_horizon_pipeline(df: pd.DataFrame,
     # Verificar disponibilidade de bibliotecas
     if not XGB_AVAILABLE:
         raise ImportError("XGBoost não está disponível")
+    
+    # Informar sobre status das bibliotecas opcionais
     if not OPTUNA_AVAILABLE:
-        raise ImportError("Optuna não está disponível")
+        print("⚠️ Optuna não disponível - usando hiperparâmetros padrão")
+    elif not OPTUNA_XGBOOST_INTEGRATION:
+        print("⚠️ Optuna XGBoost integration não disponível - usando otimização básica")
+    
     if not MLFLOW_AVAILABLE:
         print("⚠️ MLflow não disponível - resultados não serão tracked")
+    
+    if not SHAP_AVAILABLE:
+        print("⚠️ SHAP não disponível - interpretabilidade limitada")
     
     # Estrutura para armazenar resultados
     results = {}
     
     # Configurar MLflow
     if MLFLOW_AVAILABLE:
+        import mlflow
         experiment_name = f"multi_horizon_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}"
         mlflow.set_experiment(experiment_name)
     
@@ -904,10 +1064,22 @@ def run_multi_horizon_pipeline(df: pd.DataFrame,
     print(f"  Val:   {test_start - val_start} samples ({val_size:.1%})")
     print(f"  Test:  {n_samples - test_start} samples ({test_size:.1%})")
     
-    # Adicionar features de funding cycle (agora 60 minutos como padrão)
+    # Adicionar features de funding cycle parametrizado por símbolo
     crypto_features = Crypto24x7Features()
+    
+    # Resolver período de funding dinamicamente
+    symbol = config.symbol if 'config' in locals() else "BTCUSDT"
+    last_timestamp = df.index[-1] if not df.empty else None
+    funding_period_minutes = resolve_funding_minutes(symbol, last_timestamp)
+    
+    # Log adicional se MLflow disponível  
+    if MLFLOW_AVAILABLE:
+        import mlflow
+        mlflow.log_param("funding_period_minutes", funding_period_minutes)
+        mlflow.log_param("funding_symbol", symbol)
+    
     features_with_funding = crypto_features.create_funding_features(
-        df, features, funding_period_minutes=60  # Atualizado conforme nova regra Binance 2025
+        df, features, funding_period_minutes=funding_period_minutes
     )
     
     # Processar cada horizonte
@@ -916,11 +1088,24 @@ def run_multi_horizon_pipeline(df: pd.DataFrame,
         print(f"⏱️ Processando horizonte: {horizon}")
         print(f"{'='*60}")
         
-        run_context = mlflow.start_run(run_name=f"horizon_{horizon}") if MLFLOW_AVAILABLE else None
+        run_context = None
+        if MLFLOW_AVAILABLE:
+            import mlflow
+            try:
+                run_context = mlflow.start_run(run_name=f"horizon_{horizon}", nested=True)
+            except Exception:
+                # Se der erro com nested, tentar sem ou finalizar run anterior
+                try:
+                    mlflow.end_run()
+                    run_context = mlflow.start_run(run_name=f"horizon_{horizon}")
+                except Exception:
+                    print("⚠️ Erro ao inicializar MLflow run - continuando sem tracking")
+                    run_context = None
         
         try:
             # Log do horizonte
             if MLFLOW_AVAILABLE:
+                import mlflow
                 mlflow.log_param("horizon", horizon)
                 mlflow.log_param("n_trials", n_trials)
                 mlflow.log_param("k_range", k_range)
@@ -940,6 +1125,7 @@ def run_multi_horizon_pipeline(df: pd.DataFrame,
             )
             
             if MLFLOW_AVAILABLE:
+                import mlflow
                 mlflow.log_metric(f"optimal_k_{horizon}", optimal_k)
             
             # Criar labels com k otimizado
@@ -1016,12 +1202,18 @@ def run_multi_horizon_pipeline(df: pd.DataFrame,
                 
                 # Treinar com early stopping e pruning
                 model = xgb.XGBClassifier(**params)
+                
+                # Usar callback apropriado baseado na disponibilidade
+                callbacks = []
+                if OPTUNA_AVAILABLE:
+                    callbacks.append(create_xgb_pruning_callback(trial, "validation_0-aucpr"))
+                
                 model.fit(
                     X_train_scaled, y_train_binary,
                     eval_set=[(X_val_scaled, y_val_binary)],
                     verbose=False,
                     early_stopping_rounds=200,
-                    callbacks=[XGBoostPruningCallback(trial, "validation_0-aucpr")]
+                    callbacks=callbacks if callbacks else None
                 )
                 
                 # Salvar melhor iteração no trial
@@ -1035,22 +1227,50 @@ def run_multi_horizon_pipeline(df: pd.DataFrame,
                 return pr_auc
             
             # Executar otimização
-            study = optuna.create_study(
-                direction='maximize',
-                sampler=optuna.samplers.TPESampler(seed=42),
-                pruner=optuna.pruners.MedianPruner()
-            )
+            if OPTUNA_AVAILABLE:
+                study = safe_optuna_study(
+                    direction='maximize',
+                    sampler=optuna.samplers.TPESampler(seed=42),
+                    pruner=optuna.pruners.MedianPruner()
+                )
+                
+                study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+                
+                # Melhores parâmetros
+                best_params = study.best_params
+                best_score = study.best_value
+            else:
+                # Fallback: usar hiperparâmetros padrão otimizados
+                print("⚠️ Usando hiperparâmetros padrão (Optuna não disponível)")
+                best_params = {
+                    'max_depth': 6,
+                    'learning_rate': 0.05,
+                    'n_estimators': 200,
+                    'subsample': 0.8,
+                    'colsample_bytree': 0.8,
+                    'gamma': 0.1,
+                    'reg_alpha': 0.1,
+                    'reg_lambda': 1.0,
+                    'min_child_weight': 1,
+                    'scale_pos_weight': ((1 - train_pos_pct) / train_pos_pct) if train_pos_pct > 0 else 1.0,
+                    'objective': 'binary:logistic',
+                    'eval_metric': 'aucpr',
+                    'tree_method': 'hist',
+                    'random_state': 42
+                }
+                
+                # Avaliar hiperparâmetros padrão
+                temp_model = xgb.XGBClassifier(**best_params)
+                temp_model.fit(X_train_scaled, y_train_binary, eval_set=[(X_val_scaled, y_val_binary)], verbose=False, early_stopping_rounds=200)
+                y_pred_proba = temp_model.predict_proba(X_val_scaled)[:, 1]
+                best_score = average_precision_score(y_val_binary, y_pred_proba)
             
-            study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
-            
-            # Melhores parâmetros
-            best_params = study.best_params
-            
-            # Recuperar melhor iteração se disponível
-            best_iteration = study.best_trial.user_attrs.get('best_iteration')
-            if best_iteration is not None:
-                best_params['n_estimators'] = int(best_iteration)
-                print(f"📊 Usando melhor iteração do early stopping: {best_iteration}")
+            # Recuperar melhor iteração se disponível (só quando Optuna usado)
+            if OPTUNA_AVAILABLE and 'study' in locals():
+                best_iteration = study.best_trial.user_attrs.get('best_iteration')
+                if best_iteration is not None:
+                    best_params['n_estimators'] = int(best_iteration)
+                    print(f"📊 Usando melhor iteração do early stopping: {best_iteration}")
             
             best_params.update({
                 'scale_pos_weight': ((1 - train_pos_pct) / train_pos_pct) if train_pos_pct > 0 else 1.0,
@@ -1060,10 +1280,10 @@ def run_multi_horizon_pipeline(df: pd.DataFrame,
                 'random_state': 42
             })
             
-            print(f"\n✅ Melhor PR-AUC em validação: {study.best_value:.4f}")
+            print(f"\n✅ Melhor PR-AUC em validação: {best_score:.4f}")
             
             if MLFLOW_AVAILABLE:
-                mlflow.log_metric(f"best_pr_auc_val_{horizon}", study.best_value)
+                mlflow.log_metric(f"best_pr_auc_val_{horizon}", best_score)
                 mlflow.log_params({f"xgb_{k}_{horizon}": v for k, v in best_params.items()})
             
             # 5. Treinar modelo final
@@ -1138,6 +1358,7 @@ def run_multi_horizon_pipeline(df: pd.DataFrame,
             
             # Log métricas no MLflow
             if MLFLOW_AVAILABLE:
+                import mlflow
                 mlflow.log_metrics({
                     f"test_pr_auc_{horizon}": test_pr_auc,
                     f"test_f1_{horizon}": test_f1,
@@ -1185,6 +1406,16 @@ def run_multi_horizon_pipeline(df: pd.DataFrame,
                 'test_indices': X_test.index  # Salvar índices para backtest
             }
             
+            # Limpeza de memória após cada horizonte
+            del X_train, X_val, X_test, y_train, y_val, y_test
+            del X_train_scaled, X_val_scaled, X_test_scaled
+            del y_train_binary, y_val_binary, y_test_binary
+            del y_test_pred_raw, y_test_pred_cal, y_test_pred_binary
+            if 'temp_model' in locals():
+                del temp_model
+            gc.collect()
+            print(f"🧹 Memória limpa após horizonte {horizon}")
+            
             # Salvar modelo
             import joblib
             model_path = f"{config.models_path}/xgb_{horizon}_{experiment_name if MLFLOW_AVAILABLE else 'local'}.pkl"
@@ -1197,10 +1428,12 @@ def run_multi_horizon_pipeline(df: pd.DataFrame,
             }, model_path)
             
             if MLFLOW_AVAILABLE:
+                import mlflow
                 mlflow.log_artifact(model_path)
         
         finally:
             if MLFLOW_AVAILABLE and run_context:
+                import mlflow
                 mlflow.end_run()
     
     # 9. Análise comparativa entre horizontes
@@ -1244,17 +1477,720 @@ def run_multi_horizon_pipeline(df: pd.DataFrame,
     # Salvar comparação
     comparison_df.to_csv(f"{config.reports_path}/horizon_comparison_{experiment_name if MLFLOW_AVAILABLE else 'local'}.csv")
     
+    # Limpeza final de memória
+    del features_with_funding, pred_matrix, corr_matrix, comparison_df
+    gc.collect()
+    print(f"\n🧹 Pipeline finalizado - memória limpa")
+    
     return results
 
 print("✅ Função run_multi_horizon_pipeline definida")# %% [markdown]
-# ## 8. Sistema de Backtest Multi-Horizonte
+# ## 8. Pipeline LSTM para Séries Temporais
+# 
+# Implementação de LSTM com:
+# - Otimização Bayesiana via Optuna
+# - PR-AUC como métrica alvo
+# - Calibração isotônica
+# - Threshold otimizado no validation
+# - Export para produção via TorchScript
+
+# %%
+# Funções de preparação de dados sequenciais
+def make_sequences(X_df: pd.DataFrame, y_series: pd.Series, seq_len: int):
+    """
+    Cria sequências para LSTM a partir de dados tabulares
+    
+    Args:
+        X_df: Features
+        y_series: Labels
+        seq_len: Comprimento da sequência
+        
+    Returns:
+        X_seq: Array de sequências [n_samples, seq_len, n_features]
+        y_seq: Array de labels
+        idx_seq: Índices pandas correspondentes
+    """
+    X = X_df.values.astype(np.float32)
+    y = y_series.values.astype(np.int64)
+    idx = X_df.index
+
+    X_seq, y_seq, idx_seq = [], [], []
+    for t in range(seq_len, len(X)):
+        X_seq.append(X[t-seq_len:t])
+        y_seq.append(y[t])
+        idx_seq.append(idx[t])
+    
+    return np.array(X_seq), np.array(y_seq), pd.Index(idx_seq)
+
+def train_val_test_split_time(X_df: pd.DataFrame, y: pd.Series, n_splits: int = 5):
+    """
+    Split temporal para treino/validação/teste
+    
+    Args:
+        X_df: Features
+        y: Labels
+        n_splits: Número de splits para TimeSeriesSplit
+        
+    Returns:
+        tr_idx: Índices de treino
+        va_idx: Índices de validação
+        te_idx: Índices de teste
+    """
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    splits = list(tscv.split(X_df))
+    
+    # Penúltimo split para validação
+    (tr_idx, va_idx) = splits[-2]
+    # Último split para teste
+    (tr2_idx, te_idx) = splits[-1]
+    
+    # Treino = do início até fim do penúltimo split
+    tr_idx_full = np.arange(0, va_idx[-1] + 1)
+    
+    return tr_idx_full, va_idx, te_idx
+
+def build_lstm_tensors(X_df: pd.DataFrame, y: pd.Series, seq_len: int, 
+                      tr_idx, va_idx, te_idx):
+    """
+    Prepara tensores para LSTM com escalonamento
+    
+    Args:
+        X_df: Features
+        y: Labels
+        seq_len: Comprimento da sequência
+        tr_idx, va_idx, te_idx: Índices dos splits
+        
+    Returns:
+        Tupla com tensores de treino/val/test, índices e scaler
+    """
+    # Escalonar features com base no treino
+    scaler = StandardScaler()
+    X_train_df = X_df.iloc[tr_idx]
+    scaler.fit(X_train_df.values)
+    
+    # Aplicar escalonamento
+    Xs = pd.DataFrame(
+        scaler.transform(X_df.values), 
+        index=X_df.index, 
+        columns=X_df.columns
+    )
+    
+    # Gerar sequências
+    X_seq, y_seq, idx_seq = make_sequences(Xs, y, seq_len)
+    
+    # Mapear índices originais para índices da sequência
+    idx_map = pd.Series(range(len(idx_seq)), index=idx_seq)
+    
+    # Obter índices das sequências para cada split
+    tr = idx_map[idx_seq.intersection(X_df.index[tr_idx])].dropna().astype(int).values
+    va = idx_map[idx_seq.intersection(X_df.index[va_idx])].dropna().astype(int).values
+    te = idx_map[idx_seq.intersection(X_df.index[te_idx])].dropna().astype(int).values
+    
+    # Separar tensores
+    Xtr, ytr = X_seq[tr], y_seq[tr]
+    Xva, yva = X_seq[va], y_seq[va]
+    Xte, yte = X_seq[te], y_seq[te]
+    
+    return (Xtr, ytr, Xva, yva, Xte, yte, idx_seq[te], scaler)
+
+# %%
+# Modelo LSTM para classificação binária
+if TORCH_AVAILABLE:
+    class LSTMClassifier(nn.Module):
+        """
+        LSTM para classificação binária de séries temporais
+        """
+        def __init__(self, in_dim: int, hidden: int, layers: int, dropout: float):
+            super().__init__()
+            self.lstm = nn.LSTM(
+                in_dim, hidden, 
+                num_layers=layers, 
+                batch_first=True, 
+                dropout=dropout if layers > 1 else 0
+            )
+            self.head = nn.Linear(hidden, 1)
+            
+        def forward(self, x):
+            # x: [batch, seq, feat]
+            out, _ = self.lstm(x)
+            # Usar apenas último timestep
+            logit = self.head(out[:, -1, :])
+            return logit.squeeze(1)  # Retorna logits (sem sigmoid)
+
+# %%
+# Funções de treinamento e avaliação
+if TORCH_AVAILABLE:
+    def train_one_epoch(model, optimizer, loss_fn, loader, device):
+        """
+        Treina modelo por uma época
+        
+        Args:
+            model: Modelo LSTM
+            optimizer: Otimizador
+            loss_fn: Função de perda
+            loader: DataLoader
+            device: Device (cuda/cpu)
+            
+        Returns:
+            Loss médio da época
+        """
+        model.train()
+        total_loss = 0.0
+        
+        for xb, yb in loader:
+            xb = xb.to(device)
+            yb = yb.to(device).float()
+            
+            optimizer.zero_grad()
+            logits = model(xb)
+            loss = loss_fn(logits, yb)
+            loss.backward()
+            
+            # Gradient clipping para estabilidade
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            
+            optimizer.step()
+            total_loss += loss.item() * xb.size(0)
+            
+        return total_loss / len(loader.dataset)
+    
+    @torch.no_grad()
+    def eval_ap(model, loader, device):
+        """
+        Avalia modelo com Average Precision (PR-AUC)
+        
+        Args:
+            model: Modelo LSTM
+            loader: DataLoader
+            device: Device
+            
+        Returns:
+            ap: Average Precision score
+            probs: Probabilidades preditas
+            labels: Labels verdadeiros
+        """
+        model.eval()
+        probs_list, labels_list = [], []
+        
+        for xb, yb in loader:
+            xb = xb.to(device)
+            logits = model(xb)
+            probs = torch.sigmoid(logits).cpu().numpy()
+            probs_list.append(probs)
+            labels_list.append(yb.numpy())
+        
+        labels = np.concatenate(labels_list)
+        probs = np.concatenate(probs_list)
+        
+        ap = average_precision_score(labels, probs)
+        return ap, probs, labels
+
+# %%
+# Objetivo do Optuna para LSTM
+if TORCH_AVAILABLE and OPTUNA_AVAILABLE:
+    def objective_lstm(trial, X_train, y_train, X_val, y_val, seq_len, device):
+        """
+        Função objetivo para otimização com Optuna
+        
+        Args:
+            trial: Trial do Optuna
+            X_train, y_train: Dados de treino
+            X_val, y_val: Dados de validação
+            seq_len: Comprimento da sequência
+            device: Device (cuda/cpu)
+            
+        Returns:
+            Best Average Precision obtido
+        """
+        # Hiperparâmetros para otimizar
+        hidden = trial.suggest_categorical("hidden", [64, 128, 256])
+        layers = trial.suggest_int("layers", 1, 3)
+        dropout = trial.suggest_float("dropout", 0.0, 0.4)
+        lr = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
+        wd = trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True)
+        batch_size = trial.suggest_categorical("batch_size", [64, 128, 256])
+        
+        # Criar modelo
+        model = LSTMClassifier(
+            X_train.shape[-1], hidden, layers, dropout
+        ).to(device)
+        
+        # BCEWithLogitsLoss com peso para desbalanceamento
+        pos_ratio = y_train.mean()
+        pos_ratio = float(pos_ratio if pos_ratio > 0 else 1e-6)
+        pos_weight = torch.tensor((1 - pos_ratio) / pos_ratio, device=device)
+        loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        
+        # Otimizador
+        optimizer = torch.optim.AdamW(
+            model.parameters(), 
+            lr=lr, 
+            weight_decay=wd
+        )
+        
+        # DataLoaders
+        train_dataset = TensorDataset(
+            torch.tensor(X_train, dtype=torch.float32),
+            torch.tensor(y_train, dtype=torch.float32)
+        )
+        val_dataset = TensorDataset(
+            torch.tensor(X_val, dtype=torch.float32),
+            torch.tensor(y_val, dtype=torch.float32)
+        )
+        
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size, 
+            shuffle=True, 
+            drop_last=True
+        )
+        val_loader = DataLoader(
+            val_dataset, 
+            batch_size=512, 
+            shuffle=False
+        )
+        
+        # Treinar com early stopping via pruning
+        best_ap = 0.0
+        patience_counter = 0
+        patience = 10
+        
+        for epoch in range(60):
+            # Treinar
+            train_loss = train_one_epoch(
+                model, optimizer, loss_fn, train_loader, device
+            )
+            
+            # Avaliar
+            ap, _, _ = eval_ap(model, val_loader, device)
+            
+            # Reportar ao Optuna
+            trial.report(ap, epoch)
+            
+            # Pruning
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+            
+            # Track best
+            if ap > best_ap:
+                best_ap = ap
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                
+            # Early stopping
+            if patience_counter >= patience:
+                break
+                
+        return best_ap
+
+# %%
+# Pipeline de treinamento com Optuna
+if TORCH_AVAILABLE and OPTUNA_AVAILABLE:
+    def fit_lstm_with_optuna(Xtr, ytr, Xva, yva, n_trials=50, 
+                            device="cuda" if torch.cuda.is_available() else "cpu"):
+        """
+        Treina LSTM com otimização Bayesiana
+        
+        Args:
+            Xtr, ytr: Dados de treino
+            Xva, yva: Dados de validação
+            n_trials: Número de trials do Optuna
+            device: Device para treino
+            
+        Returns:
+            model: Modelo treinado
+            best_params: Melhores hiperparâmetros
+        """
+        print(f"\n🔍 Otimização Bayesiana com Optuna ({n_trials} trials)")
+        
+        # Criar estudo
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=optuna.samplers.TPESampler(seed=42),
+            pruner=optuna.pruners.MedianPruner()
+        )
+        
+        # Otimizar
+        study.optimize(
+            lambda t: objective_lstm(t, Xtr, ytr, Xva, yva, Xtr.shape[1], device),
+            n_trials=n_trials,
+            show_progress_bar=True
+        )
+        
+        best_params = study.best_params
+        print(f"✅ Melhor AP em validação: {study.best_value:.4f}")
+        print(f"📊 Melhores parâmetros: {best_params}")
+        
+        # Re-treinar com melhores parâmetros no conjunto completo (treino + val)
+        print(f"\n🏋️ Treinando modelo final...")
+        
+        model = LSTMClassifier(
+            Xtr.shape[-1], 
+            best_params['hidden'],
+            best_params['layers'],
+            best_params['dropout']
+        ).to(device)
+        
+        # Combinar treino e validação
+        X_combined = np.concatenate([Xtr, Xva])
+        y_combined = np.concatenate([ytr, yva])
+        
+        # Loss com peso para manter balanceamento de classes
+        pos_ratio = y_combined.mean()
+        pos_ratio = float(pos_ratio if pos_ratio > 0 else 1e-6)
+        pos_weight = torch.tensor((1 - pos_ratio) / pos_ratio, device=device)
+        loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=best_params['lr'],
+            weight_decay=best_params['weight_decay']
+        )
+        
+        combined_dataset = TensorDataset(
+            torch.tensor(X_combined, dtype=torch.float32),
+            torch.tensor(y_combined, dtype=torch.float32)
+        )
+        
+        combined_loader = DataLoader(
+            combined_dataset,
+            batch_size=best_params['batch_size'],
+            shuffle=True,
+            drop_last=True
+        )
+        
+        # Treinar por mais épocas (1.5x)
+        for epoch in range(90):
+            train_loss = train_one_epoch(
+                model, optimizer, loss_fn, combined_loader, device
+            )
+            if epoch % 10 == 0:
+                print(f"  Época {epoch}: Loss = {train_loss:.4f}")
+        
+        return model, best_params
+
+# %%
+# Calibração e seleção de threshold
+if TORCH_AVAILABLE:
+    @torch.no_grad()
+    def calibrate_and_choose_threshold(model, Xva, yva, device):
+        """
+        Calibra probabilidades e escolhe threshold ótimo
+        
+        Args:
+            model: Modelo LSTM treinado
+            Xva, yva: Dados de validação
+            device: Device
+            
+        Returns:
+            calibrator: Calibrador isotônico
+            threshold: Threshold ótimo
+        """
+        from sklearn.isotonic import IsotonicRegression
+        
+        model.eval()
+        
+        # Obter probabilidades
+        Xva_tensor = torch.tensor(Xva, dtype=torch.float32).to(device)
+        logits = model(Xva_tensor)
+        probs = torch.sigmoid(logits).cpu().numpy()
+        
+        # Calibração isotônica
+        calibrator = IsotonicRegression(out_of_bounds='clip')
+        probs_cal = calibrator.fit_transform(probs, yva)
+        
+        # Escolher threshold que maximiza F1
+        precision, recall, thresholds = precision_recall_curve(yva, probs_cal)
+        f1_scores = 2 * (precision * recall) / (precision + recall + 1e-12)
+        
+        # Ignorar último elemento (threshold = 1.0)
+        best_idx = np.nanargmax(f1_scores[:-1])
+        best_threshold = float(thresholds[best_idx]) if len(thresholds) > 0 else 0.5
+        best_f1 = f1_scores[best_idx]
+        
+        print(f"\n📐 Calibração completa")
+        print(f"  Threshold ótimo: {best_threshold:.3f}")
+        print(f"  F1 em validação: {best_f1:.3f}")
+        
+        # Calcular Brier score
+        from sklearn.metrics import brier_score_loss
+        brier_before = brier_score_loss(yva, probs)
+        brier_after = brier_score_loss(yva, probs_cal)
+        print(f"  Brier Score: {brier_before:.4f} → {brier_after:.4f}")
+        
+        return calibrator, best_threshold
+    
+    @torch.no_grad()
+    def predict_proba(model, X, device):
+        """
+        Prediz probabilidades para conjunto de dados
+        
+        Args:
+            model: Modelo LSTM
+            X: Features
+            device: Device
+            
+        Returns:
+            Probabilidades preditas
+        """
+        model.eval()
+        X_tensor = torch.tensor(X, dtype=torch.float32).to(device)
+        logits = model(X_tensor)
+        return torch.sigmoid(logits).cpu().numpy()
+
+# %%
+# Avaliação no teste e geração de sinais
+if TORCH_AVAILABLE:
+    def evaluate_on_test(model, Xte, yte, calibrator, threshold, test_index, device):
+        """
+        Avalia modelo no conjunto de teste
+        
+        Args:
+            model: Modelo LSTM treinado
+            Xte, yte: Dados de teste
+            calibrator: Calibrador isotônico
+            threshold: Threshold escolhido
+            test_index: Índices do teste
+            device: Device
+            
+        Returns:
+            Dicionário com métricas e predições
+        """
+        # Predições
+        probs = predict_proba(model, Xte, device)
+        probs_cal = calibrator.transform(probs)
+        preds = (probs_cal >= threshold).astype(int)
+        
+        # Métricas
+        ap = average_precision_score(yte, probs_cal)
+        f1 = f1_score(yte, preds)
+        acc = accuracy_score(yte, preds)
+        
+        # MCC e Brier
+        mcc = matthews_corrcoef(yte, preds)
+        brier = brier_score_loss(yte, probs_cal)
+        
+        # Confusion matrix - forçar shape 2x2 para evitar erro quando só uma classe é predita
+        cm = confusion_matrix(yte, preds, labels=[0, 1])
+        
+        # Desempacotar matriz de forma segura
+        if cm.shape == (2, 2):
+            tn, fp, fn, tp = cm.ravel()
+        else:
+            # Fallback se algo der errado
+            tn = fp = fn = tp = 0
+        
+        # Sinais para backtest (-1 para short, +1 para long)
+        signals = pd.Series((preds * 2 - 1), index=test_index)
+        
+        print(f"\n📊 Resultados no Teste:")
+        print(f"  AP (PR-AUC): {ap:.4f}")
+        print(f"  F1 Score:    {f1:.4f}")
+        print(f"  Accuracy:    {acc:.4f}")
+        print(f"  MCC:         {mcc:.4f}")
+        print(f"  Brier Score: {brier:.4f}")
+        print(f"\n  Confusion Matrix:")
+        print(f"    TN: {tn:4d}  FP: {fp:4d}")
+        print(f"    FN: {fn:4d}  TP: {tp:4d}")
+        
+        return {
+            "ap": ap,
+            "f1": f1,
+            "accuracy": acc,
+            "mcc": mcc,
+            "brier": brier,
+            "confusion_matrix": cm,
+            "proba": probs_cal,
+            "pred": preds,
+            "signals": signals
+        }
+
+# %%
+# Export para produção
+if TORCH_AVAILABLE:
+    def export_torchscript(model, in_dim, seq_len, path="lstm_model.pt", device="cpu"):
+        """
+        Exporta modelo para TorchScript
+        
+        Args:
+            model: Modelo LSTM
+            in_dim: Dimensão de entrada
+            seq_len: Comprimento da sequência
+            path: Caminho para salvar
+            device: Device
+            
+        Returns:
+            Caminho do arquivo salvo
+        """
+        model_cpu = model.to(device).eval()
+        
+        # Input dummy para tracing
+        dummy_input = torch.randn(1, seq_len, in_dim).to(device)
+        
+        # Trace e salvar
+        traced_model = torch.jit.trace(model_cpu, dummy_input)
+        traced_model.save(path)
+        
+        print(f"✅ Modelo exportado para: {path}")
+        return path
+
+# %%
+# Pipeline completo LSTM
+def run_lstm_pipeline(X_df: pd.DataFrame, 
+                     y_series: pd.Series,
+                     seq_len: int = 64,
+                     n_trials: int = 20,  # Reduzido para otimização de memória
+                     device: str = None,
+                     horizon: str = "lstm") -> Dict:
+    """
+    Pipeline completo para treinar LSTM com Optuna
+    
+    Args:
+        X_df: DataFrame com features
+        y_series: Series com labels binárias
+        seq_len: Comprimento das sequências (default: 64 = 16 horas em 15min)
+        n_trials: Número de trials do Optuna
+        device: Device para treino (None = auto-detectar)
+        horizon: Nome do horizonte para logging
+        
+    Returns:
+        Dicionário com resultados compatível com run_multi_horizon_backtest
+    """
+    if not TORCH_AVAILABLE:
+        print("⚠️ PyTorch não disponível - pulando LSTM")
+        return {}
+    
+    if not OPTUNA_AVAILABLE:
+        print("⚠️ Optuna não disponível - pulando otimização LSTM")
+        return {}
+    
+    # Auto-detectar device
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    print(f"\n{'='*80}")
+    print(f"🚀 PIPELINE LSTM - Horizonte: {horizon}")
+    print(f"{'='*80}")
+    print(f"📊 Dataset: {len(X_df)} amostras, {X_df.shape[1]} features")
+    print(f"⚙️  Device: {device}")
+    print(f"📏 Sequência: {seq_len} timesteps")
+    
+    # 1. Split temporal
+    print(f"\n1️⃣ Preparando splits temporais...")
+    tr_idx, va_idx, te_idx = train_val_test_split_time(X_df, y_series)
+    print(f"  Treino:    {len(tr_idx)} amostras")
+    print(f"  Validação: {len(va_idx)} amostras")
+    print(f"  Teste:     {len(te_idx)} amostras")
+    
+    # 2. Preparar tensores
+    print(f"\n2️⃣ Gerando sequências e escalonando features...")
+    (Xtr, ytr, Xva, yva, Xte, yte, test_index, scaler) = build_lstm_tensors(
+        X_df, y_series, seq_len, tr_idx, va_idx, te_idx
+    )
+    print(f"  Sequências treino: {Xtr.shape}")
+    print(f"  Sequências valid:  {Xva.shape}")
+    print(f"  Sequências teste:  {Xte.shape}")
+    
+    # 3. Otimização com Optuna
+    print(f"\n3️⃣ Otimização Bayesiana...")
+    model, best_params = fit_lstm_with_optuna(
+        Xtr, ytr, Xva, yva, n_trials=n_trials, device=device
+    )
+    
+    # 4. Calibração e threshold
+    print(f"\n4️⃣ Calibração de probabilidades...")
+    calibrator, threshold = calibrate_and_choose_threshold(
+        model, Xva, yva, device
+    )
+    
+    # 5. Avaliação no teste
+    print(f"\n5️⃣ Avaliação no conjunto de teste...")
+    eval_results = evaluate_on_test(
+        model, Xte, yte, calibrator, threshold, test_index, device
+    )
+    
+    # 6. Export para produção
+    print(f"\n6️⃣ Exportando modelo...")
+    model_path = f"artifacts/models/lstm_{horizon}.pt"
+    os.makedirs("artifacts/models", exist_ok=True)
+    
+    export_path = export_torchscript(
+        model, Xtr.shape[-1], seq_len, 
+        path=model_path, device="cpu"
+    )
+    
+    # 7. Preparar resultados no formato esperado
+    results = {
+        horizon: {
+            "best_params": best_params,
+            "threshold": threshold,
+            "test_metrics": {
+                "accuracy": eval_results["accuracy"],
+                "precision": eval_results["confusion_matrix"][1,1] / 
+                            (eval_results["confusion_matrix"][1,1] + 
+                             eval_results["confusion_matrix"][0,1] + 1e-10),
+                "recall": eval_results["confusion_matrix"][1,1] / 
+                         (eval_results["confusion_matrix"][1,1] + 
+                          eval_results["confusion_matrix"][1,0] + 1e-10),
+                "f1": eval_results["f1"],
+                "pr_auc": eval_results["ap"],
+                "mcc": eval_results["mcc"],
+                "brier": eval_results["brier"]
+            },
+            "test_indices": test_index.tolist(),
+            "predictions": {
+                "proba": eval_results["proba"],
+                "binary": eval_results["pred"]
+            },
+            "signals": eval_results["signals"],
+            "confusion_matrix": eval_results["confusion_matrix"],
+            "artifact": export_path,
+            "scaler": scaler,
+            "model_type": "lstm"
+        }
+    }
+    
+    # MLflow logging se disponível
+    if MLFLOW_AVAILABLE:
+        import mlflow
+        
+        mlflow.log_params({
+            f"lstm_seq_len_{horizon}": seq_len,
+            f"lstm_device_{horizon}": device,
+            **{f"lstm_{k}_{horizon}": v for k, v in best_params.items()}
+        })
+        
+        mlflow.log_metrics({
+            f"lstm_pr_auc_test_{horizon}": eval_results["ap"],
+            f"lstm_f1_test_{horizon}": eval_results["f1"],
+            f"lstm_mcc_test_{horizon}": eval_results["mcc"],
+            f"lstm_brier_test_{horizon}": eval_results["brier"]
+        })
+        
+        mlflow.log_artifact(export_path)
+    
+    print(f"\n✅ Pipeline LSTM completo para horizonte {horizon}")
+    print(f"{'='*80}")
+    
+    return results
+
+print("✅ Pipeline LSTM definido e pronto para uso")
+
+# %% [markdown]
+# ## 9. Sistema de Backtest Multi-Horizonte
 
 # %%
 # Definir BacktestConfig e BacktestEngine caso não estejam disponíveis via import local
+# NOTA: Esta é uma implementação de fallback quando os imports do projeto não estão disponíveis
+# A implementação principal está em src/backtest/engine.py
+# Ambas as implementações mantêm a mesma interface e lógica de custos
 if not LOCAL_IMPORTS_AVAILABLE:
+    print("⚠️ Usando implementação local do BacktestEngine (imports do projeto não disponíveis)")
+    
     @dataclass
     class BacktestConfig:
-        """Configuração para backtest"""
+        """Configuração para backtest - versão local de fallback"""
         initial_capital: float = 100000
         fee_bps: float = 5
         slippage_bps: float = 10
@@ -1372,8 +2308,8 @@ def run_multi_horizon_backtest(df: pd.DataFrame,
         bt_engine = BacktestEngine(config)
         perf, trades = bt_engine.run_backtest(df.loc[signals.index], signals)
         
-        # Métricas de trading
-        returns = perf['returns'].dropna()
+        # Métricas de trading - usar net_returns que inclui custos
+        returns = perf['net_returns'].dropna()
         cumulative_return = (1 + returns).cumprod().iloc[-1] - 1 if len(returns) > 0 else 0
         
         # Sharpe Ratio
@@ -1701,8 +2637,8 @@ print("""
    df = pd.read_csv('seu_arquivo.csv', index_col='timestamp', parse_dates=True)
    
    # Opção 2: API (se disponível)
-   from src.data.loader import BinanceDataLoader
-   loader = BinanceDataLoader()
+   from src.data.binance_loader import CryptoDataLoader
+   loader = CryptoDataLoader()
    df = loader.fetch_ohlcv('BTCUSDT', '15m', limit=10000)
    ```
 
@@ -1713,11 +2649,13 @@ print("""
    
    # Adicionar features crypto 24/7
    crypto_features = Crypto24x7Features()
+   # Definir período de funding baseado no contrato (480 min para maioria, 60 min para alguns)
+   funding_period = 480  # Ajustar conforme símbolo/exchange
    features = pd.concat([
        features,
        crypto_features.create_calendar_features(df),
        crypto_features.create_session_features(df),
-       crypto_features.create_funding_features(df)
+       crypto_features.create_funding_features(df, funding_period_minutes=funding_period)
    ], axis=1)
    ```
 

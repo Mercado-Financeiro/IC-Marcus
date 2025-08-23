@@ -1,527 +1,299 @@
-# 🏗️ System Architecture
+# 🏗️ Architecture - ML Trading Pipeline
 
 ## Overview
 
-This document describes the architecture of the ML Trading Pipeline system, a production-ready machine learning platform for cryptocurrency trading using advanced time series analysis and ensemble methods.
+Production-ready machine learning pipeline for cryptocurrency trading with XGBoost and LSTM models, featuring Bayesian optimization, temporal validation, and comprehensive backtesting.
 
-## System Design Principles
+## 🎯 Core Architecture Decisions
 
-1. **Modularity**: Each component is self-contained and loosely coupled
-2. **Reproducibility**: Deterministic training with fixed seeds and versioned data
-3. **Scalability**: Designed to handle multiple symbols and timeframes
-4. **Observability**: Comprehensive logging, tracking, and monitoring
-5. **Security**: Defense in depth with multiple security layers
-6. **Testability**: Every component has comprehensive test coverage
+### Labeling Strategy: Binary Classification + Double Threshold
 
-## High-Level Architecture
+**DECISION**: Binary classification with double threshold strategy instead of triple barrier method.
 
-```mermaid
-graph TB
-    subgraph "Data Layer"
-        A[Binance API] --> B[Data Loader]
-        B --> C[Cache Layer]
-        C --> D[Data Validator]
-    end
-    
-    subgraph "Feature Engineering"
-        D --> E[Technical Features]
-        D --> F[Microstructure Features]
-        D --> G[Derivative Features]
-        E --> H[Feature Pipeline]
-        F --> H
-        G --> H
-    end
-    
-    subgraph "Labeling"
-        H --> I[Triple Barrier]
-        I --> J[Sample Weights]
-    end
-    
-    subgraph "Model Training"
-        J --> K[XGBoost]
-        J --> L[LSTM]
-        K --> M[Calibration]
-        L --> M
-        M --> N[Threshold Optimization]
-    end
-    
-    subgraph "Validation"
-        N --> O[Purged K-Fold]
-        O --> P[Embargo]
-        P --> Q[Metrics]
-    end
-    
-    subgraph "Production"
-        Q --> R[Model Registry]
-        R --> S[API Server]
-        R --> T[Paper Trader]
-        R --> U[Dashboard]
-    end
-    
-    subgraph "MLOps"
-        Q --> V[MLflow]
-        V --> W[Experiments]
-        V --> X[Artifacts]
-        V --> Y[Metrics]
-    end
+**RATIONALE**:
+- **Better Probability Calibration**: Single calibration curve vs. multiple curves
+- **Adaptive Thresholds**: No retraining needed for threshold optimization
+- **Superior OOS Generalization**: More robust out-of-sample performance
+- **Simpler Pipeline**: Easier to maintain and debug
+- **Reduced Overfitting**: Less complex labeling reduces model overfitting
+
+**IMPLEMENTATION**:
+```
+Binary Labels: {0, 1} (no position, position)
+Double Threshold: P < 0.35 → short, 0.35 ≤ P ≤ 0.65 → neutral, P > 0.65 → long
+EV Optimization: Expected Value optimization considering transaction costs
+Neutral Zone: Reduces overtrading and improves Sharpe ratio
 ```
 
-## Component Architecture
+**ADVANTAGES OVER TRIPLE BARRIER**:
+- ✅ Single probability distribution to calibrate
+- ✅ Threshold optimization without retraining
+- ✅ Better handling of market regime changes
+- ✅ Simpler backtesting and evaluation
+- ✅ More interpretable model outputs
 
-### 1. Data Layer (`src/data/`)
+### Model Strategy: Dual Approach
 
-```
-┌──────────────────────────────────────┐
-│           Data Layer                  │
-├──────────────────────────────────────┤
-│ • binance_loader.py                  │
-│   - REST API integration             │
-│   - WebSocket support (future)       │
-│   - Rate limiting                    │
-│   - Retry logic                      │
-│                                      │
-│ • Cache Management                   │
-│   - Parquet format                   │
-│   - Hash-based validation            │
-│   - TTL policies                     │
-│                                      │
-│ • Data Validation (Pandera)          │
-│   - Schema enforcement               │
-│   - Type checking                    │
-│   - Range validation                 │
-│   - Monotonicity checks              │
-└──────────────────────────────────────┘
-```
+**XGBoost**: Primary model for production
+- Fast training and inference
+- Good interpretability with SHAP
+- Robust to overfitting
+- Handles missing values well
 
-**Key Design Decisions:**
-- Parquet format for efficient storage and fast I/O
-- Pandera for runtime data validation
-- Local cache to minimize API calls
-- Fallback to yfinance for redundancy
+**LSTM**: Secondary model for ensemble
+- Captures temporal dependencies
+- Better for complex patterns
+- Slower but potentially more accurate
 
-### 2. Feature Engineering (`src/features/`)
+**Ensemble**: Weighted combination of both models
+
+## 🔄 Data Flow
 
 ```
-┌──────────────────────────────────────┐
-│        Feature Engineering            │
-├──────────────────────────────────────┤
-│ • engineering.py                     │
-│   - Price features (returns, ratios) │
-│   - Technical indicators (100+)      │
-│   - Rolling statistics               │
-│   - Lookback windows                 │
-│                                      │
-│ • microstructure.py                  │
-│   - Order Book Imbalance (OBI)       │
-│   - VPIN                             │
-│   - Kyle's Lambda                    │
-│   - Roll measure                     │
-│                                      │
-│ • derivatives.py                     │
-│   - Funding rates                    │
-│   - Open interest                    │
-│   - Basis spreads                    │
-│   - Liquidation metrics              │
-│                                      │
-│ • labels.py                          │
-│   - Triple Barrier Method            │
-│   - Dynamic barriers (ATR)           │
-│   - Sample weights                   │
-│   - Class balancing                  │
-└──────────────────────────────────────┘
+┌─────────────────┐     ┌──────────────┐     ┌─────────────┐
+│  Data Ingestion │────▶│   Features   │────▶│   Models    │
+│   (Binance)     │     │  Engineering │     │ (XGB/LSTM)  │
+└─────────────────┘     └──────────────┘     └─────────────┘
+         │                      │                     │
+         ▼                      ▼                     ▼
+┌─────────────────┐     ┌──────────────┐     ┌─────────────┐
+│   Validation    │     │  Backtesting │     │   MLflow    │
+│  (PurgedKFold)  │     │   Engine     │     │   Tracking  │
+└─────────────────┘     └──────────────┘     └─────────────┘
+         │                      │                     │
+         └──────────────────────┴─────────────────────┘
+                               ▼
+                        ┌──────────────┐
+                        │  Dashboard   │
+                        │  (Streamlit) │
+                        └──────────────┘
 ```
 
-**Key Design Decisions:**
-- No future information leakage (careful with rolling windows)
-- Fit scalers only on training data
-- Parallel processing for expensive computations
-- Modular feature groups for easy testing
+## 📊 Feature Engineering
 
-### 3. Model Layer (`src/models/`)
+### Technical Indicators (100+ features)
+- **Momentum**: RSI, MACD, Stochastic, Williams %R
+- **Volatility**: ATR, Bollinger Bands, Keltner Channels
+- **Trend**: Moving Averages, ADX, Parabolic SAR
+- **Volume**: OBV, VWAP, Volume Profile
+- **Microstructure**: Bid-ask spread, order flow imbalance
 
-```
-┌──────────────────────────────────────┐
-│           Model Layer                 │
-├──────────────────────────────────────┤
-│ • xgb_optuna.py                      │
-│   - Bayesian optimization            │
-│   - Pruning strategies               │
-│   - Feature importance               │
-│   - Calibration                      │
-│                                      │
-│ • lstm_optuna.py                     │
-│   - Sequence modeling                │
-│   - Attention mechanisms             │
-│   - Dropout regularization           │
-│   - Gradient clipping                │
-│                                      │
-│ • ensemble.py                        │
-│   - Voting classifier                │
-│   - Stacking                         │
-│   - Weighted averaging               │
-│   - Meta-learner                     │
-│                                      │
-│ • Calibration & Thresholds           │
-│   - Isotonic regression              │
-│   - Platt scaling                    │
-│   - F1 optimization                  │
-│   - EV optimization                  │
-└──────────────────────────────────────┘
-```
+### Market Microstructure Features
+- **Order Book**: Depth, imbalance, pressure
+- **Trade Flow**: Size distribution, frequency
+- **Liquidity**: Spread, depth, resilience
 
-**Key Design Decisions:**
-- Optuna for efficient hyperparameter search
-- Mandatory calibration for probability estimates
-- Double threshold strategy (long/short/neutral)
-- Scikit-learn compatible interface for all models
+### Time-Based Features
+- **Cyclical**: Hour, day, week patterns
+- **Event-Based**: News, earnings, halvings
+- **Regime**: Volatility regime, trend regime
 
-### 4. Validation Layer (`src/data/splits.py`)
+## 🎯 Model Training
 
-```
-┌──────────────────────────────────────┐
-│         Validation Layer              │
-├──────────────────────────────────────┤
-│ • Purged K-Fold                      │
-│   - Remove overlapping samples       │
-│   - Maintain temporal order          │
-│   - Respect label horizons           │
-│                                      │
-│ • Embargo                            │
-│   - Gap between train/val            │
-│   - Prevent information leakage      │
-│   - Configurable periods             │
-│                                      │
-│ • Walk-Forward Analysis              │
-│   - Expanding window                 │
-│   - Rolling window                   │
-│   - Anchored window                  │
-└──────────────────────────────────────┘
-```
+### Validation Strategy: Purged K-Fold
+- **Purge Period**: 10 bars before/after each fold
+- **Embargo Period**: 5 bars after each fold
+- **Folds**: 5-fold time series split
+- **Objective**: Prevent data leakage
 
-**Key Design Decisions:**
-- Never use standard K-Fold for time series
-- Embargo size based on label horizon
-- Always maintain chronological order
-- Sample weights preserved through splits
+### Optimization: Bayesian with Optuna
+- **Trials**: 100+ trials per model
+- **Pruning**: Hyperband pruner
+- **Sampler**: TPE (Tree-structured Parzen Estimator)
+- **Metrics**: F1, PR-AUC, ROC-AUC, Brier Score
 
-### 5. Backtesting Engine (`src/backtest/`)
+### Calibration: Isotonic/Platt
+- **Method**: Isotonic regression (preferred)
+- **Fallback**: Platt scaling
+- **Validation**: 5-fold cross-validation
+- **Objective**: Reliable probability estimates
 
-```
-┌──────────────────────────────────────┐
-│        Backtesting Engine             │
-├──────────────────────────────────────┤
-│ • Trade Execution                    │
-│   - T+1 execution rule               │
-│   - Slippage modeling                │
-│   - Transaction costs                │
-│   - Position sizing                  │
-│                                      │
-│ • Risk Management                    │
-│   - Kelly criterion                  │
-│   - Volatility targeting             │
-│   - Maximum leverage                 │
-│   - Drawdown limits                  │
-│                                      │
-│ • Performance Metrics                │
-│   - Sharpe ratio                     │
-│   - Sortino ratio                    │
-│   - Maximum drawdown                 │
-│   - Calmar ratio                     │
-│   - Win rate                         │
-│   - Profit factor                    │
-└──────────────────────────────────────┘
-```
+## 📈 Backtesting Engine
 
-**Key Design Decisions:**
-- Vectorized operations for speed
-- Realistic cost modeling (fees + slippage + funding)
-- T+1 execution to prevent look-ahead bias
-- Multiple position sizing methods
+### Execution Model
+- **Rule**: Next bar open execution
+- **Slippage**: 10 bps (basis points)
+- **Fees**: 5 bps per trade
+- **Position Sizing**: Kelly criterion
 
-### 6. MLOps Infrastructure (`src/mlops/`)
+### Risk Management
+- **Stop Loss**: 2% per position
+- **Take Profit**: 4% per position
+- **Max Position Size**: 5% of portfolio
+- **Max Drawdown**: 20% limit
 
-```
-┌──────────────────────────────────────┐
-│         MLOps Infrastructure          │
-├──────────────────────────────────────┤
-│ • MLflow Integration                 │
-│   - Experiment tracking              │
-│   - Hyperparameter logging           │
-│   - Metric tracking                  │
-│   - Artifact storage                 │
-│                                      │
-│ • Model Registry                     │
-│   - Version control                  │
-│   - Stage management                 │
-│   - Champion/Challenger              │
-│   - Rollback capability              │
-│                                      │
-│ • Model Validator                    │
-│   - Metric thresholds                │
-│   - Overfitting checks               │
-│   - Data drift detection             │
-│   - Performance monitoring           │
-└──────────────────────────────────────┘
-```
+### Performance Metrics
+- **Returns**: Sharpe ratio, Sortino ratio
+- **Risk**: Max drawdown, VaR, CVaR
+- **Trading**: Win rate, profit factor, recovery factor
 
-**Key Design Decisions:**
-- MLflow for standardized tracking
-- Semantic versioning for models
-- Automated promotion based on metrics
-- Comprehensive validation before deployment
+## 🚀 Production Pipeline
 
-### 7. Dashboard (`src/dashboard/`)
+### Model Serving
+- **API**: REST endpoints for predictions
+- **Batch**: Scheduled batch predictions
+- **Real-time**: WebSocket for live data
+- **Caching**: Redis for performance
 
-```
-┌──────────────────────────────────────┐
-│           Dashboard                   │
-├──────────────────────────────────────┤
-│ • Pages                              │
-│   - Overview (metrics, status)       │
-│   - Performance (equity, drawdown)   │
-│   - Features (importance, SHAP)      │
-│   - Threshold Tuning (interactive)   │
-│   - Live Trading (positions, P&L)    │
-│   - MLflow (experiments, runs)       │
-│                                      │
-│ • Real-time Updates                  │
-│   - WebSocket connections            │
-│   - Auto-refresh                     │
-│   - Live charts                      │
-│                                      │
-│ • Interactive Controls               │
-│   - Model selection                  │
-│   - Timeframe adjustment             │
-│   - Threshold sliders                │
-│   - Export functionality             │
-└──────────────────────────────────────┘
-```
+### Monitoring
+- **Model Drift**: Statistical tests for data drift
+- **Performance**: Real-time P&L tracking
+- **Alerts**: Slack/email notifications
+- **Logging**: Structured logging with structlog
 
-**Key Design Decisions:**
-- Streamlit for rapid development
-- Caching for performance
-- Plotly for interactive charts
-- Session state for user preferences
+### Deployment
+- **Staging**: Automated testing environment
+- **Production**: Blue-green deployment
+- **Rollback**: Automatic rollback on issues
+- **Versioning**: Semantic versioning
 
-## Data Flow
+## 🔧 MLOps Infrastructure
 
-### Training Pipeline
+### Version Control
+- **Code**: Git with conventional commits
+- **Data**: DVC for data versioning
+- **Models**: MLflow model registry
+- **Configs**: YAML configuration files
 
-```
-1. Data Ingestion
-   └─> Cache Check
-       └─> API Fetch (if needed)
-           └─> Validation
-               └─> Feature Engineering
-                   └─> Labeling
-                       └─> Train/Val Split
-                           └─> Model Training
-                               └─> Hyperparameter Optimization
-                                   └─> Calibration
-                                       └─> Threshold Optimization
-                                           └─> Validation Metrics
-                                               └─> MLflow Logging
-                                                   └─> Model Registry
-```
+### CI/CD Pipeline
+- **Testing**: Unit, integration, regression tests
+- **Security**: Pre-commit hooks, dependency scanning
+- **Deployment**: Automated deployment on merge
+- **Monitoring**: Post-deployment validation
 
-### Inference Pipeline
+### Security
+- **Secrets**: Environment variables, secret management
+- **Access**: Role-based access control
+- **Audit**: Comprehensive logging and monitoring
+- **Compliance**: Financial regulations compliance
 
-```
-1. New Data
-   └─> Validation
-       └─> Feature Engineering
-           └─> Model Prediction
-               └─> Calibration
-                   └─> Threshold Application
-                       └─> Signal Generation
-                           └─> Risk Management
-                               └─> Order Execution
-                                   └─> Position Update
-```
+## 📊 Dashboard Features
 
-## Security Architecture
+### Real-time Monitoring
+- **Model Performance**: Live P&L, drawdown
+- **Position Tracking**: Current positions, P&L
+- **Risk Metrics**: VaR, exposure, concentration
+- **System Health**: API status, model drift
 
-### Defense in Depth
+### Analysis Tools
+- **Feature Importance**: SHAP values, permutation importance
+- **Threshold Tuning**: Interactive EV optimization
+- **Performance Analysis**: Equity curves, drawdown analysis
+- **Model Comparison**: A/B testing results
 
-```
-┌──────────────────────────────────────┐
-│         Security Layers               │
-├──────────────────────────────────────┤
-│ 1. Code Security                     │
-│   • Static analysis (bandit)         │
-│   • Type checking (mypy)             │
-│   • Linting (ruff, black)            │
-│                                      │
-│ 2. Dependency Security               │
-│   • pip-audit                        │
-│   • safety checks                    │
-│   • License compliance               │
-│                                      │
-│ 3. Secret Management                 │
-│   • detect-secrets                   │
-│   • .env files (never committed)     │
-│   • Environment variables            │
-│                                      │
-│ 4. Data Security                     │
-│   • Encryption at rest               │
-│   • API key rotation                 │
-│   • Access logging                   │
-│                                      │
-│ 5. Runtime Security                  │
-│   • Input validation                 │
-│   • Rate limiting                    │
-│   • Error handling                   │
-└──────────────────────────────────────┘
-```
+### Configuration
+- **Model Parameters**: Hyperparameter tuning
+- **Trading Rules**: Position sizing, risk limits
+- **Data Sources**: Market data configuration
+- **Alerts**: Custom alert thresholds
 
-## Scalability Considerations
+## 🔄 Development Workflow
 
-### Horizontal Scaling
-- Stateless model servers
-- Load balancing for API
-- Distributed training (future)
+### Local Development
+1. **Setup**: `make install` - Install dependencies
+2. **Data**: `make data` - Download and process data
+3. **Train**: `make train-xgb` - Train XGBoost model
+4. **Test**: `make test` - Run test suite
+5. **Dashboard**: `make dash` - Launch dashboard
 
-### Vertical Scaling
-- GPU acceleration for LSTM
-- Multi-threading for XGBoost
-- Vectorized operations
+### Production Deployment
+1. **Build**: `make build` - Build Docker image
+2. **Test**: `make test-prod` - Production tests
+3. **Deploy**: `make deploy` - Deploy to production
+4. **Monitor**: `make monitor` - Monitor deployment
 
-### Data Scaling
-- Partitioned storage
-- Incremental processing
-- Streaming updates (future)
+### Maintenance
+1. **Update**: `make update` - Update dependencies
+2. **Audit**: `make security-audit` - Security audit
+3. **Backup**: `make backup` - Backup data and models
+4. **Cleanup**: `make cleanup` - Clean old artifacts
 
-## Technology Stack
+## 📋 Component Details
 
-### Core Technologies
-- **Python 3.11+**: Primary language
-- **XGBoost 2.0+**: Gradient boosting
-- **PyTorch 2.0+**: Deep learning
-- **Pandas/NumPy**: Data manipulation
-- **Scikit-learn**: ML utilities
+### Data Layer (`src/data/`)
+- **Loaders**: Binance API, CSV, Parquet
+- **Validation**: Schema validation, data quality checks
+- **Splits**: Time series splits with purging
+- **Caching**: Redis caching for performance
 
-### Infrastructure
-- **MLflow**: Experiment tracking
-- **Streamlit**: Dashboard
-- **Docker**: Containerization
-- **GitHub Actions**: CI/CD
-- **DVC**: Data versioning (optional)
+### Features Layer (`src/features/`)
+- **Indicators**: Technical indicator calculation
+- **Labeling**: Binary classification labeling
+- **Engineering**: Feature creation and selection
+- **Scaling**: Robust scaling for features
 
-### Development Tools
-- **Pytest**: Testing framework
-- **Pre-commit**: Git hooks
-- **Black/Ruff**: Code formatting
-- **Mypy**: Type checking
-- **Jupyter**: Notebooks
+### Models Layer (`src/models/`)
+- **XGBoost**: Gradient boosting implementation
+- **LSTM**: Deep learning implementation
+- **Ensemble**: Model combination strategies
+- **Calibration**: Probability calibration
 
-## Performance Optimizations
+### Backtest Layer (`src/backtest/`)
+- **Engine**: Core backtesting engine
+- **Execution**: Order execution simulation
+- **Risk**: Risk management rules
+- **Metrics**: Performance calculation
 
-### Training Optimizations
-- Early stopping
-- Pruning (Optuna)
-- Parallel CV folds
-- GPU acceleration (LSTM)
+### Trading Layer (`src/trading/`)
+- **Strategies**: Trading strategy implementations
+- **Paper Trading**: Risk-free trading simulation
+- **Position Management**: Position sizing and management
+- **Risk Management**: Stop loss and take profit
 
-### Inference Optimizations
-- Model quantization (future)
-- Batch predictions
-- Caching
-- Lazy loading
+### Dashboard Layer (`src/dashboard/`)
+- **Streamlit App**: Main dashboard application
+- **Components**: Reusable UI components
+- **Charts**: Interactive charts and visualizations
+- **Configuration**: Dashboard settings
 
-### Data Optimizations
-- Parquet format
-- Column pruning
-- Chunked processing
-- Index optimization
+### MLOps Layer (`src/mlops/`)
+- **Tracking**: MLflow experiment tracking
+- **Registry**: Model versioning and registry
+- **Monitoring**: Model and system monitoring
+- **Deployment**: Model deployment automation
 
-## Monitoring and Observability
+## 🎯 Performance Targets
 
-### Metrics Collection
-```python
-# Application metrics
-- Model latency
-- Prediction throughput
-- API response times
-- Error rates
+### Model Performance
+- **F1 Score**: > 0.60 (currently 0.434)
+- **PR-AUC**: > 0.60 (currently 0.714 ✅)
+- **ROC-AUC**: > 0.55 (currently 0.500)
+- **Brier Score**: < 0.25 (currently 0.250)
 
-# Business metrics
-- Sharpe ratio
-- Win rate
-- Drawdown
-- P&L
+### Trading Performance
+- **Sharpe Ratio**: > 1.0
+- **Max Drawdown**: < 20%
+- **Win Rate**: > 55%
+- **Profit Factor**: > 1.5
 
-# System metrics
-- CPU/Memory usage
-- Disk I/O
-- Network traffic
-- Queue depths
-```
+### System Performance
+- **Latency**: < 100ms for predictions
+- **Throughput**: > 1000 predictions/second
+- **Uptime**: > 99.9%
+- **Recovery Time**: < 5 minutes
 
-### Logging Strategy
-- Structured logging (JSON)
-- Log levels (DEBUG/INFO/WARN/ERROR)
-- Correlation IDs
-- Centralized aggregation (future)
+## 🔮 Future Enhancements
 
-### Alerting Rules
-- Model degradation
-- Data drift
-- System failures
-- Trading anomalies
+### Short Term (1-3 months)
+- **LSTM Implementation**: Complete LSTM model training
+- **Ensemble Optimization**: Improve model combination
+- **Feature Selection**: Automated feature selection
+- **Hyperparameter Tuning**: Advanced optimization techniques
 
-## Deployment Architecture
+### Medium Term (3-6 months)
+- **Multi-Asset**: Support for multiple cryptocurrencies
+- **Alternative Data**: News sentiment, on-chain data
+- **Advanced Risk Management**: Dynamic position sizing
+- **Real-time Trading**: Live trading integration
 
-### Development Environment
-```
-Local Machine
-├── Virtual Environment
-├── Local MLflow
-├── File-based cache
-└── Streamlit (localhost)
-```
-
-### Production Environment (Future)
-```
-Cloud Platform
-├── Kubernetes Cluster
-│   ├── Model Servers (pods)
-│   ├── API Gateway
-│   └── Load Balancer
-├── Managed Services
-│   ├── PostgreSQL (MLflow)
-│   ├── S3 (artifacts)
-│   └── Redis (cache)
-└── Monitoring
-    ├── Prometheus
-    ├── Grafana
-    └── AlertManager
-```
-
-## Future Enhancements
-
-### Short-term (1-3 months)
-- WebSocket data feeds
-- Real-time inference
-- Multi-asset portfolio
-- Advanced risk metrics
-
-### Medium-term (3-6 months)
-- Reinforcement learning
-- Market regime detection
-- Cross-exchange arbitrage
-- Social sentiment analysis
-
-### Long-term (6-12 months)
-- Distributed training
-- AutoML capabilities
-- Multi-strategy ensemble
-- Blockchain integration
-
-## Conclusion
-
-This architecture provides a robust, scalable, and maintainable foundation for machine learning-based cryptocurrency trading. The modular design allows for easy extension and modification while maintaining system integrity and performance.
+### Long Term (6+ months)
+- **Reinforcement Learning**: RL-based trading strategies
+- **Market Making**: Automated market making
+- **Portfolio Optimization**: Multi-asset portfolio management
+- **Regulatory Compliance**: Advanced compliance features
 
 ---
+
 **Last Updated**: 2025-08-22
 **Version**: 1.0.0
-**Author**: ML Trading Pipeline Team
+**Status**: 🟡 Beta (XGBoost optimization in progress, LSTM pending)

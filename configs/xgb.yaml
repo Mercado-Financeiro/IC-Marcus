@@ -1,9 +1,17 @@
-# configs/xgb.yaml - Configurações XGBoost
-# Baseado no PRD XGBoost.md e otimizações testadas
+# configs/xgb.yaml - Configurações XGBoost Multi-Horizonte
+# Baseado no PRD XGBoost.md e implementação do notebook
 
 # Configurações básicas
 seed: 42
 deterministic: true
+symbol: "BTCUSDT"
+
+# Multi-horizon settings
+horizons: ['15m', '30m', '60m', '120m']
+
+# Data splits
+test_size: 0.2
+val_size: 0.2
 
 # Cross-validation
 cv:
@@ -11,7 +19,7 @@ cv:
   n_splits: 5
   embargo: 10  # barras
   shuffle: false
-  
+
 # XGBoost hiperparâmetros base
 xgb:
   # Core parameters
@@ -19,56 +27,63 @@ xgb:
   eval_metric: "aucpr"  # Melhor para dados desbalanceados
   tree_method: "hist"
   device: "cpu"  # Para determinismo garantido
-  
+
   # Estrutura das árvores
   n_estimators: 500
   max_depth: 6
   min_child_weight: 1
-  
-  # Learning rate  
+
+  # Learning rate
   learning_rate: 0.05
-  
+
   # Regularização
   reg_alpha: 0.01   # L1 regularization
   reg_lambda: 1.0   # L2 regularization
   gamma: 0.0        # Min split loss
-  
+
   # Sampling
   subsample: 0.8
   colsample_bytree: 0.8
   colsample_bylevel: 1.0
   colsample_bynode: 1.0
-  
+
   # Early stopping
   early_stopping_rounds: 100  # Mais paciência para aprendizado
-  
+
   # Categorical features
   enable_categorical: false
-  
+
   # Multi-threading
   n_jobs: 1  # Single thread para determinismo
-  
+
   # Verbosity
   verbosity: 1
-  
+
+# Adaptive labeling
+adaptive_labeling:
+  vol_estimator: "yang_zhang"  # 'atr', 'garman_klass', 'yang_zhang', 'parkinson'
+  neutral_zone: true
+  funding_aware: true
+  k_optimization: true
+
 # Otimização Bayesiana com Optuna
 optuna:
   enabled: true
-  n_trials: 100
+  n_trials: 50  # Reduzido para multi-horizon
   timeout: 3600  # 1 hora máximo
-  
+
   # Pruning
   pruner:
     type: "hyperband"
     min_resource: 10
     max_resource: 100
     reduction_factor: 3
-    
+
   # Sampler
   sampler:
     type: "tpe"
     n_startup_trials: 10
-    
+
   # Espaço de busca
   search_space:
     n_estimators:
@@ -76,48 +91,48 @@ optuna:
       low: 100
       high: 1000
       step: 50
-      
+
     max_depth:
-      type: "int" 
+      type: "int"
       low: 3
       high: 10
-      
+
     learning_rate:
       type: "float"
       low: 0.01
       high: 0.3
       log: true
-      
+
     min_child_weight:
       type: "float"
       low: 1.0
       high: 5.0
-      
+
     reg_alpha:
       type: "float"
       low: 0.0
       high: 1.0
-      
+
     reg_lambda:
-      type: "float" 
+      type: "float"
       low: 0.1
       high: 3.0  # Menos agressivo
-      
+
     subsample:
       type: "float"
       low: 0.7  # Valores maiores
       high: 1.0
-      
+
     colsample_bytree:
       type: "float"
       low: 0.7  # Valores maiores
       high: 1.0
-      
+
     gamma:
       type: "float"
       low: 0.0
       high: 1.0  # Menos restritivo
-      
+
 # Pós-processamento obrigatório
 postprocessing:
   # Calibração obrigatória
@@ -125,39 +140,39 @@ postprocessing:
     enabled: true
     method: "isotonic"  # ou "sigmoid"
     cv: "prefit"       # Usar validação separada
-    
+
   # Threshold optimization
   threshold_tuning:
     enabled: true
     methods: ["f1", "pr_auc", "ev_net"]
-    
+
     # Threshold por EV líquido (PRD obrigatório)
     ev_optimization:
       cost_per_trade_bps: 10  # fee + slippage
       min_threshold: 0.1
       max_threshold: 0.9
       step: 0.01
-      
+
 # Interpretabilidade
 interpretability:
   shap:
     enabled: true
     explainer: "tree"
     max_samples: 1000
-    
+
   feature_importance:
     methods: ["gain", "weight", "cover", "total_gain", "total_cover"]
-    
+
   permutation_importance:
     enabled: true
     n_repeats: 5
     random_state: 42
-    
+
 # Quantile regression (PRD XGBoost)
 quantile:
   enabled: false  # Opcional, model separado
   quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
-  
+
 # Custos para threshold EV
 costs:
   fee_bps: 5.0
@@ -165,14 +180,14 @@ costs:
   funding_apr: 0.0
   borrow_apr: 0.0
   total_bps: 10.0  # fee + slippage
-  
+
 # Métricas alvo (DoD)
 targets:
   f1_score: 0.6
   pr_auc: 0.6
   roc_auc: 0.65
   brier_score_max: 0.25
-  
+
 # Logging e tracking
 logging:
   mlflow:
@@ -183,13 +198,13 @@ logging:
       prd_name: "PRD_XGB"
       prd_version: "1.0.0"
       exec_rule: "next_bar_open"
-      
+
   artifacts:
     save_model: true
     save_calibrator: true
     save_shap: true
     save_plots: true
-    
+
 # Fast mode para testes
 fast_mode:
   enabled: false

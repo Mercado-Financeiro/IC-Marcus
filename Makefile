@@ -53,6 +53,21 @@ quick-test:
 	@echo "⚡ Teste rápido com XGBoost..."
 	$(PYTHON) run_optimization.py --quick --model xgboost --symbol $(SYMBOL) --timeframe $(TIMEFRAME)
 
+# Pipeline Notebook (NOVO - Sistema Corrigido)
+.PHONY: train-notebook quick-notebook validate-notebook
+
+train-notebook:
+	@echo "🚀 Pipeline Notebook PRODUÇÃO com $(SYMBOL) $(TIMEFRAME)..."
+	$(PYTHON) run_notebook_pipeline.py --mode production --symbol $(SYMBOL) --timeframe $(TIMEFRAME) --trials 50
+
+quick-notebook:
+	@echo "⚡ Demo rápida Pipeline Notebook..."
+	$(PYTHON) run_notebook_pipeline.py --mode quick
+
+validate-notebook:
+	@echo "🧪 Validação completa Pipeline Notebook..."
+	$(PYTHON) run_notebook_pipeline.py --mode validation
+
 # Dashboard e Visualização
 .PHONY: dashboard mlflow-ui
 
@@ -135,6 +150,11 @@ help:
 	@echo "  make train-both     - Treinar ambos modelos"
 	@echo "  make quick-test     - Teste rápido"
 	@echo ""
+	@echo "🚀 Pipeline Notebook (RECOMENDADO):"
+	@echo "  make quick-notebook     - Demo rápida (5min)"
+	@echo "  make train-notebook     - Produção completa (30-60min)"
+	@echo "  make validate-notebook  - Testes de validação (15min)"
+	@echo ""
 	@echo "📊 Visualização:"
 	@echo "  make dashboard      - Dashboard Streamlit"
 	@echo "  make mlflow-ui      - MLflow UI"
@@ -151,10 +171,12 @@ help:
 	@echo "  make rollback-model MODEL_NAME=x            - Rollback de modelo"
 	@echo ""
 	@echo "💡 Exemplos:"
-	@echo "  make train-xgb SYMBOL=ETHUSDT TIMEFRAME=1h"
-	@echo "  make quick-test SYMBOL=ADAUSDT"
-	@echo "  make promote-model MODEL_NAME=crypto_xgb VERSION=1"
-	@echo "  make security-audit"
+	@echo "  make quick-notebook                                    # Demo rápida"
+	@echo "  make train-notebook SYMBOL=ETHUSDT TIMEFRAME=1h       # Produção ETHUSDT"
+	@echo "  make validate-notebook                                 # Validação completa"
+	@echo "  make train-xgb SYMBOL=ETHUSDT TIMEFRAME=1h            # XGBoost tradicional"
+	@echo "  make promote-model MODEL_NAME=crypto_xgb VERSION=1     # MLOps"
+	@echo "  make security-audit                                    # Segurança"
 
 status:
 	@echo "📊 Status do Projeto - Sistema ML Trading"

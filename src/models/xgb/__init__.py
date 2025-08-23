@@ -1,14 +1,23 @@
 """XGBoost model components."""
 
-from .base import BaseXGBoost
-from .threshold import ThresholdOptimizer
-from .validators import TemporalValidator
-from .config import XGBoostConfig, OptunaConfig
+from .optuna import (
+    XGBOptuna,
+    XGBOptunaConfig,
+    OptimizationMetrics,
+    ModelCalibrator,
+    ThresholdOptimizer,
+    TradingMetrics
+)
+
+# Alias for backward compatibility
+XGBoostOptuna = XGBOptuna
 
 __all__ = [
-    'BaseXGBoost',
-    'ThresholdOptimizer', 
-    'TemporalValidator',
-    'XGBoostConfig',
-    'OptunaConfig'
+    'XGBoostOptuna',
+    'XGBOptuna',
+    'XGBOptunaConfig',
+    'OptimizationMetrics',
+    'ModelCalibrator',
+    'ThresholdOptimizer',
+    'TradingMetrics'
 ]

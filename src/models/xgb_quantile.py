@@ -386,9 +386,9 @@ class XGBQuantileOptuna:
             # Apply sample weights if provided
             if sample_weight is not None:
                 w_train = sample_weight[train_idx]
-                model.fit(X_train, y_train, sample_weight=w_train)
+                model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False, sample_weight=w_train)
             else:
-                model.fit(X_train, y_train)
+                model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
             
             # Evaluate
             if self.metric == "roc_auc":

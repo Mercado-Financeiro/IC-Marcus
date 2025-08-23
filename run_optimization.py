@@ -153,18 +153,16 @@ class OptimizationPipeline:
 
             feature_cols = [c for c in df.columns if c not in ['open', 'high', 'low', 'close', 'volume', 'label']]
 
-        # Labeling direcional simples para criptomoedas (subir/descer)
-        # Removido Triple Barrier - usando apenas direção do preço
+        # Labeling direcional MELHORADO para criptomoedas (baseado no diagnóstico)
+        # Implementando threshold mais restritivo para filtrar ruído
         labels_config = data_config.get('labels', {})
-
-        # Configuração de labeling direcional
         horizon_minutes = labels_config.get('horizon_minutes', 15)
-        min_return_threshold = labels_config.get('min_return_threshold', 0.0)  # Threshold mínimo
-        
+        min_return_threshold = labels_config.get('min_return_threshold', 0.005)  # 0.5% mínimo (mais restritivo)
+
         # Configurações de trading (para threshold baseado em lucro)
         trading_config = data_config.get('trading', {})
         cost_per_trade = trading_config.get('costs', {}).get('cost_per_trade', 0.002)
-        win_return = trading_config.get('returns', {}).get('win_return', 0.015)
+        win_return = trading_config.get('returns', {}).get('win_return', 0.010)  # 1% mais conservador
 
         # Calcular retorno futuro baseado no horizonte
         if horizon_minutes == 15:  # 1 barra de 15min
@@ -180,8 +178,16 @@ class OptimizationPipeline:
             bars_ahead = int(horizon_minutes / 15)  # Assumindo timeframe de 15min
             future_returns = (df['close'].shift(-bars_ahead) / df['close'] - 1)
 
-        # Criar labels binários (subir=1, descer=0)
-        df['label'] = (future_returns > min_return_threshold).astype(int)
+        # Criar labels mais restritivos (baseado no diagnóstico)
+        df['label'] = 0  # Default: não operar
+
+        # Só sinalizar movimentos significativos
+        df.loc[future_returns > min_return_threshold, 'label'] = 1   # Compra forte
+        df.loc[future_returns < -min_return_threshold, 'label'] = -1 # Venda forte (para análise)
+
+        # Para XGBoost binário, converter para {0, 1}
+        # 0 = não operar ou venda, 1 = compra forte
+        df['label'] = (df['label'] == 1).astype(int)
 
         # Sample weights baseados na volatilidade (opcional)
         if labels_config.get('use_volatility_weights', False):
@@ -265,17 +271,22 @@ class OptimizationPipeline:
     def optimize_xgboost(self, data):
         """Otimização Bayesiana para XGBoost usando configurações YAML."""
 
-        xgb_config = self.configs.get('xgb', {})
-        optuna_config = xgb_config.get('optuna', {})
-
-        n_trials = optuna_config.get('n_trials', 100)
-        pruner_type = optuna_config.get('pruner', {}).get('type', 'hyperband')
-
         print(f"\n{'='*60}")
-        print(f"🎯 XGBOOST - {n_trials} trials")
+        print(f"🎯 XGBOOST - {self.configs.get('xgb', {}).get('optuna', {}).get('n_trials', 100)} trials")
         print(f"{'='*60}")
 
         start_time = time.time()
+
+        # Configurações de trading (para threshold baseado em lucro)
+        trading_config = self.configs.get('data', {}).get('trading', {})
+        cost_per_trade = trading_config.get('costs', {}).get('cost_per_trade', 0.002)
+        win_return = trading_config.get('returns', {}).get('win_return', 0.015)
+
+        # Configurações XGBoost
+        xgb_config = self.configs.get('xgb', {})
+        optuna_config = xgb_config.get('optuna', {})
+        n_trials = optuna_config.get('n_trials', 100)
+        pruner_type = optuna_config.get('pruner_type', 'hyperband')
 
         # Configurações CV
         cv_config = xgb_config.get('cv', {})
@@ -315,7 +326,7 @@ class OptimizationPipeline:
 
         # Métricas de trading baseadas em lucro (mais realistas)
         trading_metrics = xgb_opt.calculate_trading_metrics(
-            data['X_test'], 
+            data['X_test'],
             data['y_test'],
             cost_per_trade=cost_per_trade,
             win_return=win_return
