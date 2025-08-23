@@ -38,7 +38,6 @@ import mlflow
 from src.data.binance_loader import BinanceDataLoader
 from src.data.splits import PurgedKFold
 from src.features.engineering import FeatureEngineer
-from src.features.labels import TripleBarrierLabeler
 from src.models.xgb_optuna import XGBoostOptuna
 from src.models.lstm_optuna import LSTMOptuna
 from src.backtest.engine import BacktestEngine
@@ -154,50 +153,57 @@ class OptimizationPipeline:
 
             feature_cols = [c for c in df.columns if c not in ['open', 'high', 'low', 'close', 'volume', 'label']]
 
-        # Labels
-        print("\n🏷️ Criando labels...")
+        # Labeling direcional simples para criptomoedas (subir/descer)
+        # Removido Triple Barrier - usando apenas direção do preço
         labels_config = data_config.get('labels', {})
-
-        if self.quick_mode:
-            # Labels simples para teste
-            df['label'] = (df['returns'].shift(-1) > 0).astype(int)
-            sample_weights = None
+        
+        # Configuração de labeling direcional
+        horizon_minutes = labels_config.get('horizon_minutes', 15)
+        min_return_threshold = labels_config.get('min_return_threshold', 0.0)  # Threshold mínimo
+        
+        # Calcular retorno futuro baseado no horizonte
+        if horizon_minutes == 15:  # 1 barra de 15min
+            future_returns = df['returns'].shift(-1)
+        elif horizon_minutes == 30:  # 2 barras
+            future_returns = (df['close'].shift(-2) / df['close'] - 1)
+        elif horizon_minutes == 60:  # 4 barras
+            future_returns = (df['close'].shift(-4) / df['close'] - 1)
+        elif horizon_minutes == 240:  # 16 barras (4h)
+            future_returns = (df['close'].shift(-16) / df['close'] - 1)
         else:
-            # Triple Barrier usando configuração
-            triple_config = labels_config.get('triple_barrier', {})
-            labeler = TripleBarrierLabeler(
-                pt_multiplier=triple_config.get('pt_multiplier', 2.0),
-                sl_multiplier=triple_config.get('sl_multiplier', 1.5),
-                max_holding_period=triple_config.get('max_holding_periods', {}).get(timeframe, 96)
-            )
-            df, barrier_info = labeler.apply_triple_barrier(df)
-            sample_weights = labeler.calculate_sample_weights(df, barrier_info)
+            # Calcular dinamicamente baseado no timeframe
+            bars_ahead = int(horizon_minutes / 15)  # Assumindo timeframe de 15min
+            future_returns = (df['close'].shift(-bars_ahead) / df['close'] - 1)
+        
+        # Criar labels binários (subir=1, descer=0)
+        df['label'] = (future_returns > min_return_threshold).astype(int)
+        
+        # Sample weights baseados na volatilidade (opcional)
+        if labels_config.get('use_volatility_weights', False):
+            # Usar ATR para ponderar amostras mais voláteis
+            if 'atr_14' not in df.columns:
+                df['atr_14'] = ta.volatility.AverageTrueRange(
+                    df['high'], df['low'], df['close'], window=14
+                ).average_true_range()
+            
+            # Normalizar ATR para sample weights
+            atr_normalized = df['atr_14'] / df['atr_14'].mean()
+            sample_weights = np.clip(atr_normalized, 0.5, 2.0)  # Limitar entre 0.5 e 2.0
+        else:
+            sample_weights = None
 
-            # Análise de labels originais do Triple Barrier
-            if 'label' in df.columns:
-                original_distribution = df['label'].value_counts().to_dict()
-                total_samples = len(df)
-                neutral_count = original_distribution.get(0, 0)
-                neutral_pct = (neutral_count / total_samples * 100) if total_samples > 0 else 0
-
-                print(f"\n📊 Triple Barrier Label Distribution:")
-                print(f"  • Short (-1): {original_distribution.get(-1, 0)} ({original_distribution.get(-1, 0)/total_samples*100:.1f}%)")
-                print(f"  • Neutral (0): {neutral_count} ({neutral_pct:.1f}%)")
-                print(f"  • Long (1): {original_distribution.get(1, 0)} ({original_distribution.get(1, 0)/total_samples*100:.1f}%)")
-
-                # Remover neutros (0) para classificação binária e mapear {-1,1} -> {0,1}
-                # DECISÃO: Usar binária + threshold para melhor calibração e generalização
-                non_neutral_mask = df['label'] != 0
-                if sample_weights is not None:
-                    if not isinstance(sample_weights, pd.Series):
-                        sample_weights = pd.Series(sample_weights, index=df.index)
-                    sample_weights = sample_weights.loc[non_neutral_mask]
-
-                df = df.loc[non_neutral_mask].copy()
-                df['label'] = (df['label'] == 1).astype(int)
-
-                print(f"  ➤ Filtered {neutral_count} neutral labels ({neutral_pct:.1f}%)")
-                print(f"  ➤ Binary classification: {len(df)} samples remaining")
+        # Análise da distribuição de labels
+        label_distribution = df['label'].value_counts().to_dict()
+        total_samples = len(df)
+        up_count = label_distribution.get(1, 0)
+        down_count = label_distribution.get(0, 0)
+        
+        print(f"\n📊 Labeling Direcional (Subir/Descer):")
+        print(f"  • Horizonte: {horizon_minutes} minutos")
+        print(f"  • Threshold mínimo: {min_return_threshold:.4f}")
+        print(f"  • Subir (1): {up_count} ({up_count/total_samples*100:.1f}%)")
+        print(f"  • Descer (0): {down_count} ({down_count/total_samples*100:.1f}%)")
+        print(f"  • Total: {total_samples} amostras")
 
         # Limpar NaNs após criação de labels e filtragem
         df = df.dropna()

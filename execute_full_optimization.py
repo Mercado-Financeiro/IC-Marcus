@@ -31,7 +31,6 @@ import mlflow
 from src.data.binance_loader import BinanceDataLoader
 from src.data.splits import PurgedKFold
 from src.features.engineering import FeatureEngineer
-from src.features.labels import TripleBarrierLabeler
 from src.models.xgb_optuna import XGBoostOptuna
 from src.models.lstm_optuna import LSTMOptuna
 from src.backtest.engine import BacktestEngine
@@ -74,16 +73,33 @@ def run_xgboost_optimization():
     df = feature_eng.create_microstructure_features(df)
     print(f"✅ Created {df.shape[1]} features\n")
     
-    # 3. Triple Barrier Labeling
-    print("🏷️ Creating labels with Triple Barrier...")
-    labeler = TripleBarrierLabeler(
-        pt_multiplier=2.0,
-        sl_multiplier=1.5,
-        max_holding_period=100
-    )
-    df, barrier_info = labeler.apply_triple_barrier(df)
-    sample_weights = labeler.calculate_sample_weights(df, barrier_info)
-    print(f"✅ Labels: {df['label'].value_counts().to_dict()}\n")
+    # 3. Labeling Direcional Simples (Subir/Descer)
+    print("🏷️ Creating directional labels (up/down)...")
+    
+    # Configuração de labeling direcional
+    horizon_minutes = 15  # Horizonte de predição
+    min_return_threshold = 0.0  # Threshold mínimo
+    
+    # Calcular retorno futuro
+    future_returns = df['returns'].shift(-1)  # 1 barra à frente
+    
+    # Criar labels binários (subir=1, descer=0)
+    df['label'] = (future_returns > min_return_threshold).astype(int)
+    
+    # Sample weights simples (sem volatilidade por enquanto)
+    sample_weights = None
+    
+    # Análise da distribuição
+    label_distribution = df['label'].value_counts().to_dict()
+    total_samples = len(df)
+    up_count = label_distribution.get(1, 0)
+    down_count = label_distribution.get(0, 0)
+    
+    print(f"📊 Label Distribution:")
+    print(f"  • Up (1): {up_count} ({up_count/total_samples*100:.1f}%)")
+    print(f"  • Down (0): {down_count} ({down_count/total_samples*100:.1f}%)")
+    print(f"  • Total: {total_samples} samples")
+    print(f"✅ Labels created\n")
     
     # 4. Prepare ML Data
     print("📋 Preparing dataset...")

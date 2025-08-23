@@ -71,19 +71,20 @@ features:
       
 # Labeling
 labels:
-  method: "triple_barrier"
-  horizon_minutes: 15  # Fixed horizon
+  method: "directional"  # Direcional simples (subir/descer)
+  horizon_minutes: 15    # Horizonte de predição em minutos
   
-  # Triple Barrier parameters
-  triple_barrier:
-    pt_multiplier: 2.0    # take profit (2x stop loss)
-    sl_multiplier: 1.5    # stop loss multiplier
-    max_holding_periods: 
-      "5m": 60    # 5 horas
-      "15m": 96   # 24 horas  
-      "1h": 168   # 7 dias
-      "4h": 42    # 7 dias
-    min_return: 0.002     # Mínimo 20 bps
+  # Configurações de labeling direcional
+  directional:
+    min_return_threshold: 0.0  # Threshold mínimo para considerar "subir" (0 = qualquer movimento positivo)
+    use_volatility_weights: false  # Se True, usa ATR para sample weights
+    
+  # Configurações por timeframe
+  horizons:
+    "5m": 15    # 3 barras de 5min
+    "15m": 15   # 1 barra de 15min
+    "1h": 60    # 1 barra de 1h
+    "4h": 240   # 1 barra de 4h
     
 # Splits temporais
 split:
