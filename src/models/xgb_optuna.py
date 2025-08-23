@@ -18,6 +18,12 @@ try:
     MLFLOW_AVAILABLE = True
 except ImportError:
     MLFLOW_AVAILABLE = False
+
+try:
+    from optuna.integration import XGBoostPruningCallback
+    OPTUNA_XGB_INTEGRATION = True
+except ImportError:
+    OPTUNA_XGB_INTEGRATION = False
 # Logging will be initialized per instance to avoid issues
 
 import warnings
@@ -198,8 +204,8 @@ class XGBoostOptuna:
         return 0.5
 
     def _optimize_threshold_profit(
-        self, 
-        y: pd.Series, 
+        self,
+        y: pd.Series,
         y_pred_proba: np.ndarray,
         cost_per_trade: float = 0.002,
         win_return: float = 0.015,
@@ -209,7 +215,7 @@ class XGBoostOptuna:
     ) -> float:
         """
         Encontra o threshold que maximiza o lucro esperado considerando custos de transação.
-        
+
         Args:
             y: Rótulos verdadeiros (1 ou 0)
             y_pred_proba: Probabilidades preditas pelo modelo
@@ -218,39 +224,39 @@ class XGBoostOptuna:
             min_threshold: Threshold mínimo para testar
             max_threshold: Threshold máximo para testar
             n_thresholds: Número de thresholds para testar
-            
+
         Returns:
             Threshold ótimo que maximiza o lucro esperado
         """
         thresholds = np.linspace(min_threshold, max_threshold, n_thresholds)
         expected_profits = []
-        
+
         for thresh in thresholds:
             signals = (y_pred_proba >= thresh).astype(int)  # Previsões com o threshold
             n_trades = signals.sum()  # Número total de trades sinalizados
-            
+
             if n_trades == 0:
                 expected_profits.append(0)
                 continue
-            
+
             # Calcula o número de trades corretos (true positives)
             correct_trades = np.sum((signals == 1) & (signals == y))
-            
+
             # Lucro Bruto: (Trades Corretos * Retorno do Win)
             gross_profit = correct_trades * win_return
-            
+
             # Custo Total: (Número de Trades * Custo por Trade)
             total_cost = n_trades * cost_per_trade
-            
+
             # Lucro Líquido
             net_profit = gross_profit - total_cost
-            
+
             expected_profits.append(net_profit)
-        
+
         optimal_idx = np.argmax(expected_profits)
         optimal_threshold = thresholds[optimal_idx]
         max_profit = expected_profits[optimal_idx]
-        
+
         self.log.info(
             "profit_threshold_optimized",
             optimal_threshold=optimal_threshold,
@@ -259,7 +265,7 @@ class XGBoostOptuna:
             win_return=win_return,
             n_trades_at_optimal=((y_pred_proba >= optimal_threshold).astype(int)).sum()
         )
-        
+
         return optimal_threshold
 
     def _optimize_threshold_ev(self, y: pd.Series, y_pred_proba: np.ndarray, costs: Dict) -> float:
@@ -267,29 +273,29 @@ class XGBoostOptuna:
         # This is the old EV method - keeping for backward compatibility
         thresholds = np.linspace(0.1, 0.9, 100)
         ev_scores = []
-        
+
         fee_bps = costs.get('fee_bps', 5)
         slippage_bps = costs.get('slippage_bps', 5)
-        
+
         for thresh in thresholds:
             y_pred = (y_pred_proba >= thresh).astype(int)
-            
+
             # Calculate confusion matrix
             tn, fp, fn, tp = confusion_matrix(y, y_pred).ravel()
-            
+
             # Expected value calculation
             total_trades = tp + fp
             if total_trades == 0:
                 ev_scores.append(0)
                 continue
-                
+
             win_rate = tp / total_trades if total_trades > 0 else 0
             loss_rate = fp / total_trades if total_trades > 0 else 0
-            
+
             # Assume 1% gain on wins, 1% loss on losses (simplified)
             ev = (win_rate * 0.01) - (loss_rate * 0.01) - ((fee_bps + slippage_bps) / 10000)
             ev_scores.append(ev)
-        
+
         optimal_idx = np.argmax(ev_scores)
         return thresholds[optimal_idx]
 
@@ -340,12 +346,21 @@ class XGBoostOptuna:
                 # Create model WITHOUT early_stopping in constructor
                 model = xgb.XGBClassifier(**params)
 
-                # Fit model with early_stopping in fit method (XGBoost 3.x API)
+                # Prepare callbacks
+                callbacks = [xgb.callback.EarlyStopping(rounds=50, save_best=True)]
+                
+                # Add Optuna pruning callback if available
+                if OPTUNA_XGB_INTEGRATION:
+                    callbacks.append(XGBoostPruningCallback(trial, "validation_0-aucpr"))
+
+                # Fit model with early_stopping and pruning in fit method (XGBoost 3.x API)
                 model.fit(
                     X_train, y_train,
                     sample_weight=w_train,
                     eval_set=[(X_val, y_val)],
-                    verbose=False
+                    eval_metric='aucpr',  # Ensure metric matches pruning callback
+                    verbose=False,
+                    callbacks=callbacks
                 )
 
                 # Get predictions
@@ -388,8 +403,9 @@ class XGBoostOptuna:
                 # Matthews correlation coefficient
                 mcc = matthews_corrcoef(y_val, y_pred)
 
-                # Composite score (maximize)
-                score = 0.4 * f1 + 0.3 * pr_auc + 0.2 * mcc - 0.1 * brier
+                # Use PR-AUC as primary metric (per requirements)
+                # Composite score: 60% PR-AUC, 25% F1, 15% MCC penalty from Brier
+                score = 0.6 * pr_auc + 0.25 * f1 + 0.15 * mcc - 0.1 * brier
                 scores.append(score)
 
                 # Log trial metrics for debugging
@@ -545,14 +561,14 @@ class XGBoostOptuna:
         # Configurações de custos para criptomoedas (realistas)
         cost_per_trade = 0.002  # 0.2% (0.1% fee + 0.1% slippage)
         win_return = 0.015      # 1.5% retorno médio esperado por trade correto
-        
+
         # Novo threshold baseado em lucro (mais realista)
         self.threshold_profit = self._optimize_threshold_profit(
-            y, y_pred_proba, 
+            y, y_pred_proba,
             cost_per_trade=cost_per_trade,
             win_return=win_return
         )
-        
+
         # Threshold EV legado (mantido para compatibilidade)
         costs = {'fee_bps': 5, 'slippage_bps': 5}  # Default costs
         self.threshold_ev = self._optimize_threshold_ev(y, y_pred_proba, costs)
@@ -597,64 +613,64 @@ class XGBoostOptuna:
             Predicted classes
         """
         proba = self.predict_proba(X)
-        
+
         if threshold_type == 'profit':
             threshold = self.threshold_profit
         elif threshold_type == 'ev':
             threshold = self.threshold_ev
         else:  # default to f1
             threshold = self.threshold_f1
-            
+
         return (proba >= threshold).astype(int)
 
     def calculate_trading_metrics(
-        self, 
-        X: pd.DataFrame, 
+        self,
+        X: pd.DataFrame,
         y: pd.Series,
         cost_per_trade: float = 0.002,
         win_return: float = 0.015
     ) -> Dict[str, float]:
         """
         Calcula métricas de trading usando o threshold baseado em lucro.
-        
+
         Args:
             X: Features
             y: True labels
             cost_per_trade: Custo por trade (fee + slippage)
             win_return: Retorno esperado por trade correto
-            
+
         Returns:
             Dictionary com métricas de trading
         """
         y_pred_proba = self.predict_proba(X)
         y_pred_profit = self.predict(X, threshold_type='profit')
-        
+
         # Confusion matrix
         tn, fp, fn, tp = confusion_matrix(y, y_pred_profit).ravel()
-        
+
         # Métricas básicas
         total_trades = tp + fp
         correct_trades = tp
         incorrect_trades = fp
-        
+
         # Taxas
         win_rate = tp / total_trades if total_trades > 0 else 0
         accuracy = (tp + tn) / len(y) if len(y) > 0 else 0
-        
+
         # Lucro esperado
         gross_profit = correct_trades * win_return
         total_cost = total_trades * cost_per_trade
         net_profit = gross_profit - total_cost
-        
+
         # ROI
         roi = net_profit / total_cost if total_cost > 0 else 0
-        
+
         # Profit factor
         profit_factor = gross_profit / total_cost if total_cost > 0 else 0
-        
+
         # Expected value per trade
         ev_per_trade = net_profit / total_trades if total_trades > 0 else 0
-        
+
         metrics = {
             'total_trades': total_trades,
             'correct_trades': correct_trades,
@@ -671,7 +687,7 @@ class XGBoostOptuna:
             'cost_per_trade': cost_per_trade,
             'win_return': win_return
         }
-        
+
         return metrics
 
     def _log_to_mlflow(self, study: optuna.Study, X: pd.DataFrame, y: pd.Series):

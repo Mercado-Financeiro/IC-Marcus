@@ -303,16 +303,16 @@ class TestDeterminismInPipeline:
     @pytest.mark.determinism
     def test_triple_barrier_deterministic(self, sample_ohlcv_data):
         """Test that triple barrier labeling is deterministic."""
-        from src.features.labels import TripleBarrierLabeler
+        from src.features.labels import AdaptiveLabeler
         
         set_deterministic_environment(seed=888)
         
-        labeler1 = TripleBarrierLabeler()
+        labeler1 = AdaptiveLabeler()
         df1, info1 = labeler1.apply_triple_barrier(sample_ohlcv_data.copy())
         
         set_deterministic_environment(seed=888)
         
-        labeler2 = TripleBarrierLabeler()
+        labeler2 = AdaptiveLabeler()
         df2, info2 = labeler2.apply_triple_barrier(sample_ohlcv_data.copy())
         
         pd.testing.assert_series_equal(df1['label'], df2['label'])

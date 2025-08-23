@@ -1,0 +1,163 @@
+# configs/market.yaml - Configurações de mercado por símbolo
+# Atualizado para refletir mudanças da Binance (funding não é mais fixo em 8h)
+
+# Configurações globais de mercado
+market:
+  timezone: "UTC"
+  trading_mode: "24/7"  # Para criptomoedas
+
+# Configurações de funding por símbolo
+# Desde maio/2025: Binance pode ajustar frequência para 1h quando cap/floor atingido
+# Julho/2025: várias pairs voltaram a 4h
+funding:
+  # Frequência padrão (minutos) - usado quando símbolo específico não encontrado
+  default_minutes: 240  # 4h - mais comum atualmente
+  
+  # Override por símbolo específico
+  symbols:
+    # Majors - geralmente 4h (240min)
+    BTCUSDT: 240    # 4h
+    ETHUSDT: 240    # 4h
+    BNBUSDT: 240    # 4h
+    
+    # Altcoins - frequências variadas
+    ADAUSDT: 240    # 4h
+    DOTUSDT: 240    # 4h
+    LINKUSDT: 240   # 4h
+    UNIUSDT: 240    # 4h
+    
+    # Exemplos de 1h (quando alta volatilidade)
+    # DOGEUSDT: 60    # 1h - exemplo quando cap/floor atingido
+    # SHIBUSDT: 60    # 1h - exemplo quando cap/floor atingido
+    
+    # Exemplos de 8h (alguns ainda mantêm)
+    # ATOMUSDT: 480   # 8h - exemplo de exceção
+
+  # Configurações de funding rate
+  rates:
+    # Limites típicos da Binance
+    cap_rate: 0.0075    # 0.75% (cap)
+    floor_rate: -0.0075 # -0.75% (floor)
+    
+    # Quando usar frequência de 1h (critério automático)
+    high_volatility_threshold: 0.0050  # 0.50% - se rate >= threshold, considerar 1h
+    
+    # APR conversion factors por frequência
+    apr_multipliers:
+      60: 8760    # 1h: 24 * 365
+      240: 2190   # 4h: 6 * 365
+      480: 1095   # 8h: 3 * 365
+
+# Configurações de spreads e liquidez por símbolo
+spreads:
+  # Spread típico em basis points
+  typical_spread_bps:
+    BTCUSDT: 1    # 0.01% - muito líquido
+    ETHUSDT: 2    # 0.02%
+    BNBUSDT: 3    # 0.03%
+    default: 10   # 0.10% - para outros símbolos
+
+  # Market impact model
+  market_impact:
+    # Slippage = base_bps + sqrt(volume_ratio) * impact_factor
+    base_slippage_bps: 2
+    impact_factor: 0.5
+    max_slippage_bps: 50   # Cap de 0.50%
+
+# Horários especiais de trading
+trading_hours:
+  # Para criptos é 24/7, mas pode ter períodos de baixa liquidez
+  low_liquidity_periods:
+    # UTC hours com menor volume típico
+    - start: "02:00"  # 2 AM UTC
+      end: "06:00"    # 6 AM UTC
+      region: "asia_early_morning"
+  
+  # Weekend pode ter menor volume
+  weekend_factor: 0.8  # 80% do volume normal
+
+# Configurações por tipo de ativo
+asset_types:
+  perpetual_futures:
+    min_notional: 5.0     # $5 USDT mínimo
+    max_leverage: 125     # Até 125x (varia por símbolo)
+    funding_interval_check: true  # Verificar se mudou
+    
+  spot:
+    min_notional: 10.0    # $10 USDT mínimo
+    funding_applicable: false
+
+# Calendário de eventos (pode afetar funding)
+events:
+  # Eventos regulares que podem afetar rates
+  federal_meetings: []    # FOMC meetings affect crypto
+  earnings_seasons: []    # Major tech earnings
+  
+  # Maintenance windows da Binance (UTC)
+  maintenance_windows:
+    daily: "16:00-16:05"   # Daily maintenance
+    weekly: "08:00-10:00"  # Wednesday maintenance (when needed)
+
+# Configurações de monitoramento
+monitoring:
+  funding_rate_alerts:
+    # Alert se rate se aproxima dos limites
+    warning_threshold: 0.005   # 0.50%
+    critical_threshold: 0.007  # 0.70%
+    
+  frequency_change_detection:
+    # Monitorar se Binance mudou frequência
+    check_interval_minutes: 60
+    log_changes: true
+
+# Configurações específicas para diferentes exchanges
+exchanges:
+  binance:
+    api_weight_limits:
+      funding_rate: 1      # Peso por request
+      max_per_minute: 1200 # Limite da API
+    
+    websocket_streams:
+      mark_price: "@markPrice@1s"  # Stream de mark price
+      kline_15m: "@kline_15m"      # Kline 15min
+      funding_rate: "@premiumIndex" # Funding rate stream
+
+# Configurações de cache para otimização
+cache:
+  funding_rates:
+    ttl_minutes: 30       # Cache por 30min
+    
+  market_data:
+    ttl_minutes: 1        # Cache por 1min
+    
+  spreads:
+    ttl_minutes: 5        # Cache por 5min
+
+# Configurações de fallback
+fallbacks:
+  # Se API falha, usar estes valores
+  emergency_funding_rate: 0.0001  # 0.01% conservador
+  emergency_spread_bps: 20        # 0.20% conservador
+  
+  # Se frequência não encontrada
+  use_default_frequency: true
+  
+  # Se símbolo não encontrado
+  use_default_symbol_config: true
+
+# Notas de implementação
+notes:
+  funding_frequency: |
+    Implementação deve:
+    1. Consultar tabela symbols first
+    2. Usar default_minutes se não encontrar
+    3. Detectar mudanças via monitoring
+    4. Log todas as mudanças para auditoria
+    5. Cache configs por TTL definido
+  
+  integration: |
+    Para usar em features/derivatives.py:
+    - Ler esta config no init
+    - Passar symbol para get_funding_minutes(symbol)
+    - Converter APR usando multiplier correto
+    - Monitorar mudanças periodicamente

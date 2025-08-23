@@ -69,22 +69,48 @@ features:
       - liquidation_levels
       - basis_spread
 
-# Labeling
+# Labeling - Sistema Vol-Aware (Substitui Triple Barrier)
 labels:
-  method: "directional"  # Direcional simples (subir/descer)
-  horizon_minutes: 15    # Horizonte de predição em minutos
-
-  # Configurações de labeling direcional
+  method: "vol_threshold"  # Volatility-scaled threshold labeling
+  
+  # Configurações de vol-threshold
+  vol_threshold:
+    # Estimadores de volatilidade disponíveis
+    estimator: "yang_zhang"  # atr, garman_klass, yang_zhang, parkinson, realized
+    lookback: 64            # Janela para cálculo de volatilidade (em barras)
+    
+    # Multiplicador k (hiperparâmetro a otimizar)
+    k:
+      grid: [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]  # Valores para grid search
+      default: 1.0                              # Valor padrão
+    
+    # Zona neutra
+    neutral_zone: true          # Se False, apenas binário (-1, 1)
+    min_threshold: 0.001       # Threshold mínimo (0.1%)
+    max_threshold: 0.10        # Threshold máximo (10%)
+    
+    # Configurações por horizonte (em barras de 15m)
+    horizons:
+      "15m": 1     # 1 bar = 15 minutos
+      "30m": 2     # 2 bars = 30 minutos
+      "60m": 4     # 4 bars = 60 minutos
+      "120m": 8    # 8 bars = 120 minutos
+      "240m": 16   # 16 bars = 240 minutos
+      "480m": 32   # 32 bars = 480 minutos (8h)
+    
+    # Critérios de qualidade
+    min_class_ratio: 0.1       # Abortar se classe positiva < 10%
+    max_neutral_ratio: 0.6     # Abortar se neutros > 60%
+    
+    # Sample weights
+    sample_weights:
+      method: "balanced"        # balanced, sqrt, none
+      decay_factor: 0.99       # Decaimento temporal
+      
+  # Legacy support (mantido para compatibilidade)
   directional:
-    min_return_threshold: 0.0  # Threshold mínimo para considerar "subir" (0 = qualquer movimento positivo)
-    use_volatility_weights: false  # Se True, usa ATR para sample weights
-
-  # Configurações por timeframe
-  horizons:
-    "5m": 15    # 3 barras de 5min
-    "15m": 15   # 1 barra de 15min
-    "1h": 60    # 1 barra de 1h
-    "4h": 240   # 1 barra de 4h
+    min_return_threshold: 0.005  # 0.5% mínimo para filtrar ruído
+    use_volatility_weights: true  # Migrar para vol_threshold.sample_weights
 
 # Configurações de Trading (para threshold baseado em lucro)
 trading:
@@ -96,7 +122,7 @@ trading:
 
   # Retornos esperados
   returns:
-    win_return: 0.015      # 1.5% retorno médio por trade correto
+    win_return: 0.010      # 1.0% retorno médio por trade correto (mais conservador)
     loss_return: 0.010     # 1.0% perda média por trade incorreto
 
   # Configurações de threshold

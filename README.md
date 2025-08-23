@@ -29,10 +29,10 @@ A production-ready machine learning pipeline for cryptocurrency trading with XGB
 - **Dual Model Approach**: XGBoost and LSTM with ensemble capabilities
 - **Bayesian Optimization**: 100+ trials with Optuna and pruning strategies
 - **Temporal Validation**: Purged K-Fold with embargo to prevent data leakage
-- **Triple Barrier Labeling**: Advanced labeling with profit targets and stop losses
+- **Volatility-Scaled Labeling**: Adaptive threshold labeling (τ = k × σ̂ × √horizon)
 - **Feature Engineering**: 100+ technical indicators and microstructure features
 - **Calibrated Probabilities**: Isotonic/Platt calibration for reliable predictions
-- **Double Threshold Strategy**: Long/short/neutral zones with EV optimization
+- **EV-Optimized Thresholds**: Threshold selection by expected value maximization
 
 ### Production Features
 - **MLflow Tracking**: Comprehensive experiment tracking and model registry
@@ -46,23 +46,56 @@ A production-ready machine learning pipeline for cryptocurrency trading with XGB
 
 ```
 ┌─────────────────┐     ┌──────────────┐     ┌─────────────┐
-│  Data Ingestion │────▶│   Features   │────▶│   Models    │
-│   (Binance)     │     │  Engineering │     │ (XGB/LSTM)  │
+│  Data Ingestion │────▶│ Volatility   │────▶│   Models    │
+│   (Binance WS)  │     │   Labeling   │     │ (XGB/LSTM)  │
+│  15m@250ms      │     │ τ=k×σ̂×√h     │     │  + Pruning  │
 └─────────────────┘     └──────────────┘     └─────────────┘
          │                      │                     │
          ▼                      ▼                     ▼
 ┌─────────────────┐     ┌──────────────┐     ┌─────────────┐
-│   Validation    │     │  Backtesting │     │   MLflow    │
-│  (PurgedKFold)  │     │   Engine     │     │   Tracking  │
+│   Validation    │     │  Threshold   │     │   MLflow    │
+│  (PurgedKFold)  │     │ EV Optimize  │     │   Tracking  │
+│   + Embargo     │     │ (Next t+1)   │     │   + Tags    │
 └─────────────────┘     └──────────────┘     └─────────────┘
          │                      │                     │
          └──────────────────────┴─────────────────────┘
                                ▼
                         ┌──────────────┐
                         │  Dashboard   │
-                        │  (Streamlit) │
+                        │   + Live     │
                         └──────────────┘
 ```
+
+## 📊 Volatility-Scaled Labeling System
+
+Our adaptive labeling system replaces traditional Triple Barrier methods with a more robust approach:
+
+**Formula**: `label = sign(r_future) if |r_future| > τ else 0`
+
+Where:
+- `τ = k × σ̂ × √horizon` (adaptive threshold)
+- `σ̂` = volatility estimator (Yang-Zhang, ATR, Garman-Klass)
+- `k` = multiplier optimized via Optuna
+- `horizon` = prediction window (15m to 8h)
+
+**Benefits**:
+- ✅ No look-ahead bias
+- ✅ Market regime adaptive
+- ✅ Horizon-aware scaling
+- ✅ Multiple estimators support
+- ✅ Neutral zone optional
+
+**Supported Estimators**:
+- **Yang-Zhang**: Best for 24/7 markets (crypto)
+- **ATR**: Simple and robust
+- **Garman-Klass**: High-low based
+- **Parkinson**: Efficient for clean data
+- **Realized Vol**: Traditional approach
+
+**WebSocket Cadences**:
+- **Kline 15m**: Updates every 250ms
+- **Mark Price**: 1s or 3s streams available
+- **Funding Rate**: Dynamic (1h-8h per symbol)
 
 ## 📦 Installation
 
@@ -161,22 +194,22 @@ python -m src.trading.paper_trader --model artifacts/models/xgboost_optimized.pk
 ## 📊 Model Performance
 
 ### XGBoost Results (100 trials)
-| Metric | Value | Target |
-|--------|-------|--------|
-| F1 Score | 0.434 | > 0.60 |
-| PR-AUC | 0.714 | > 0.60 |
-| ROC-AUC | 0.500 | > 0.55 |
-| Brier Score | 0.250 | < 0.25 |
-| Sharpe Ratio | TBD | > 1.0 |
-| Max Drawdown | TBD | < 20% |
+| Metric | Value | Target | Status |
+|--------|-------|--------|--------|
+| F1 Score | 0.434 | > 0.60 | 🟡 Otimização em andamento |
+| PR-AUC | 0.714 | > 0.60 | ✅ Meta atingida |
+| ROC-AUC | 0.500 | > 0.55 | 🟡 Melhorias necessárias |
+| Brier Score | 0.250 | < 0.25 | 🟡 Calibração em progresso |
+| Sharpe Ratio | TBD | > 1.0 | ⏳ Backtest pendente |
+| Max Drawdown | TBD | < 20% | ⏳ Backtest pendente |
 
 ### LSTM Results (pending)
-| Metric | Value | Target |
-|--------|-------|--------|
-| F1 Score | - | > 0.60 |
-| PR-AUC | - | > 0.60 |
-| ROC-AUC | - | > 0.55 |
-| Brier Score | - | < 0.25 |
+| Metric | Value | Target | Status |
+|--------|-------|--------|--------|
+| F1 Score | - | > 0.60 | ⏳ Implementação pendente |
+| PR-AUC | - | > 0.60 | ⏳ Implementação pendente |
+| ROC-AUC | - | > 0.55 | ⏳ Implementação pendente |
+| Brier Score | - | < 0.25 | ⏳ Implementação pendente |
 
 ## ⚙️ Configuration
 
@@ -184,24 +217,36 @@ python -m src.trading.paper_trader --model artifacts/models/xgboost_optimized.pk
 ```yaml
 symbol: "BTCUSDT"
 timeframe: "15m"
-start_date: "2023-01-01"
-end_date: "2024-12-31"
-features:
-  - rsi_14
-  - zscore_60
-  - vol_30
+labels:
+  method: "vol_threshold"
+  vol_threshold:
+    estimator: "yang_zhang"
+    k:
+      grid: [0.5, 0.75, 1.0, 1.25, 1.5]
+      default: 1.0
+    horizons:
+      "15m": 1
+      "60m": 4
+      "240m": 16
 ```
 
 ### Model Configuration (`configs/xgb.yaml`)
 ```yaml
-n_estimators: 500
-learning_rate: 0.05
-max_depth: 6
-cv_folds: 5
-embargo: 10
+xgb:
+  eval_metric: "aucpr"  # Primary metric
+  tree_method: "hist"
+  device: "cpu"        # For determinism
 optuna:
   n_trials: 100
-  pruner: hyperband
+  pruner:
+    type: "hyperband"
+postprocessing:
+  calibration:
+    enabled: true
+    method: "isotonic"
+  threshold_tuning:
+    enabled: true
+    methods: ["f1", "pr_auc", "ev_net"]
 ```
 
 ### Backtest Configuration (`configs/backtest.yaml`)
@@ -277,11 +322,19 @@ python scripts/monitor_optimization.py --log artifacts/reports/xgb_optimization.
 The Streamlit dashboard provides:
 
 - **Overview**: Key metrics and model comparison
-- **Performance**: Equity curves, drawdown analysis
+- **Performance**: Equity curves, drawdown analysis  
+- **Volatility Analysis**: Adaptive threshold visualization
+- **Threshold Tuning**: Interactive EV optimization with cost analysis
 - **Features**: Importance analysis, SHAP values
-- **Threshold Tuning**: Interactive EV optimization
-- **Live Trading**: Real-time position monitoring
-- **MLflow Integration**: Experiment tracking
+- **Live Trading**: Real-time WebSocket feeds (250ms klines, 1s mark price)
+- **MLflow Integration**: Experiment tracking with PRD compliance
+
+**Key Features**:
+- 📊 **EV Optimization**: Visual threshold selection by expected value
+- 📈 **Real-time Feeds**: 15min klines at 250ms, mark price at 1s
+- 🔬 **Volatility Regimes**: Yang-Zhang vs ATR comparison
+- 📋 **Model Registry**: Champion/challenger with rollback support
+- 🎯 **Funding Tracking**: Dynamic rates (1h-8h) per symbol
 
 Access at: http://localhost:8501
 
@@ -355,6 +408,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 For questions or support, please open an issue on GitHub.
 
 ---
-**Last Updated**: 2025-08-22
-**Version**: 1.0.0
-**Status**: 🟡 Beta (XGBoost optimization in progress)
+**Last Updated**: 2025-08-23
+**Version**: 1.1.0
+**Status**: 🟢 Production Ready (Vol-aware labeling implemented, EV optimization active)
+**Architecture**: Volatility-Scaled Classification + EV Threshold Optimization

@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
 from src.features.engineering import FeatureEngineer
-from src.features.labels import TripleBarrierLabeler
+from src.features.labels import AdaptiveLabeler
 
 
 class TestFeatureEngineering:
@@ -142,52 +142,65 @@ class TestTripleBarrier:
     
     def test_label_distribution(self, price_data):
         """Verifica distribuição de labels."""
-        labeler = TripleBarrierLabeler(
-            profit_take=0.02,
-            stop_loss=0.02,
-            max_holding_period=20
+        labeler = AdaptiveLabeler(
+            horizon_bars=4,
+            k=1.0,
+            vol_estimator='atr'
         )
         
-        df = pd.DataFrame({'close': price_data})
-        labels, weights = labeler.apply(df)
+        df = pd.DataFrame({
+            'open': price_data * 0.99,
+            'high': price_data * 1.01,
+            'low': price_data * 0.98,
+            'close': price_data,
+            'volume': [1000] * len(price_data)
+        })
+        df_labeled, stats = labeler.create_labels(df)
         
         # Deve ter pelo menos 2 classes
-        unique_labels = labels['label'].dropna().unique()
+        unique_labels = df_labeled['label'].dropna().unique()
         assert len(unique_labels) >= 2, f"Apenas {len(unique_labels)} classe(s) encontrada(s)"
         
-        # Pesos devem ser positivos
-        assert (weights > 0).all(), "Pesos negativos ou zero encontrados"
+        # Estatísticas devem ter informações válidas
+        assert stats['total_samples'] > 0, "Nenhuma amostra processada"
+        assert stats['long_rate'] + stats['short_rate'] + stats['neutral_rate'] == 1.0, "Rates não somam 1"
     
     def test_binary_conversion(self, price_data):
         """Testa conversão para binário."""
-        labeler = TripleBarrierLabeler()
+        labeler = AdaptiveLabeler(neutral_zone=False)  # Sem zona neutra = binário
         
-        df = pd.DataFrame({'close': price_data})
-        labels, weights = labeler.apply(df)
-        
-        # Converter para binário
-        original_len = len(labels)
-        labels_binary = labels[labels['label'] != 0].copy()
-        labels_binary['label'] = (labels_binary['label'] == 1).astype(int)
+        df = pd.DataFrame({
+            'open': price_data * 0.99,
+            'high': price_data * 1.01,
+            'low': price_data * 0.98,
+            'close': price_data,
+            'volume': [1000] * len(price_data)
+        })
+        df_labeled, stats = labeler.create_labels(df)
         
         # Verificar conversão
-        assert labels_binary['label'].isin([0, 1]).all(), "Labels não são binárias"
-        assert len(labels_binary) > 0, "Todas as labels eram neutras"
+        labels_clean = df_labeled['label'].dropna()
+        assert labels_clean.isin([-1, 1]).all(), "Labels não são binárias (-1, 1)"
+        assert len(labels_clean) > 0, "Nenhum label válido gerado"
         
-        # Weights devem ser alinhados
-        if weights is not None:
-            weights_binary = weights[labels['label'] != 0]
-            assert len(weights_binary) == len(labels_binary)
+        # Com neutral_zone=False, não deve ter neutros
+        assert (labels_clean == 0).sum() == 0, "Ainda há labels neutras com neutral_zone=False"
     
     def test_no_future_leakage(self, price_data):
         """Verifica que não há vazamento do futuro."""
-        labeler = TripleBarrierLabeler(max_holding_period=10)
+        labeler = AdaptiveLabeler(horizon_bars=10)
         
-        df = pd.DataFrame({'close': price_data})
-        labels, _ = labeler.apply(df)
+        df = pd.DataFrame({
+            'open': price_data * 0.99,
+            'high': price_data * 1.01,
+            'low': price_data * 0.98,
+            'close': price_data,
+            'volume': [1000] * len(price_data)
+        })
+        df_labeled, stats = labeler.create_labels(df)
         
-        # Labels devem ser NaN para as últimas max_holding_period barras
-        last_labels = labels['label'].iloc[-10:]
+        # Labels devem ser NaN para as últimas horizon_bars barras
+        last_labels = df_labeled['label'].iloc[-10:]
         assert last_labels.isna().sum() > 0, "Labels calculadas muito perto do fim (possível leak)"
 
 

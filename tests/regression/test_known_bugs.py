@@ -104,7 +104,7 @@ class TestSampleWeightsAlignment:
     
     def test_sample_weights_aligned_after_neutral_filtering(self):
         """Ensure sample weights remain aligned when neutral labels are filtered."""
-        from src.features.labels import TripleBarrierLabeler
+        from src.features.labels import AdaptiveLabeler
         
         # Create sample data
         n_samples = 100
@@ -115,7 +115,7 @@ class TestSampleWeightsAlignment:
         )
         
         # Create labeler and generate labels
-        labeler = TripleBarrierLabeler()
+        labeler = AdaptiveLabeler()
         labels, weights = labeler.fit_transform(
             prices,
             pt=0.02,  # 2% profit target

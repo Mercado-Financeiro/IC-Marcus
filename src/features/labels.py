@@ -1,402 +1,256 @@
-"""Triple Barrier Method para labeling robusto."""
+"""Sistema de Labeling Adaptativo baseado em Volatilidade."""
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 import ta
 import structlog
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
 
 log = structlog.get_logger()
 
 
-class TripleBarrierLabeler:
-    """Implementação do Triple Barrier Method de Marcos López de Prado.
+class VolatilityEstimators:
+    """Estimadores de volatilidade para diferentes condições de mercado."""
     
-    Cria labels para classificação baseado em três barreiras:
-    1. Take profit (barreira superior)
-    2. Stop loss (barreira inferior)  
-    3. Tempo máximo de holding (barreira vertical)
-    """
+    @staticmethod
+    def atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
+        """Average True Range - robusto para gaps."""
+        indicator = ta.volatility.AverageTrueRange(
+            high=df['high'], 
+            low=df['low'], 
+            close=df['close'], 
+            window=window
+        )
+        return indicator.average_true_range()
+    
+    @staticmethod
+    def garman_klass(df: pd.DataFrame, window: int = 20) -> pd.Series:
+        """Garman-Klass estimator usando OHLC."""
+        log_hl = np.log(df['high'] / df['low']) ** 2
+        log_co = np.log(df['close'] / df['open']) ** 2
+        
+        gk = np.sqrt(0.5 * log_hl - (2 * np.log(2) - 1) * log_co)
+        return gk.rolling(window).mean()
+    
+    @staticmethod
+    def yang_zhang(df: pd.DataFrame, window: int = 20) -> pd.Series:
+        """Yang-Zhang estimator - mais preciso para mercados 24/7."""
+        log_ho = np.log(df['high'] / df['open'])
+        log_lo = np.log(df['low'] / df['open'])
+        log_co = np.log(df['close'] / df['open'])
+        
+        log_oc = np.log(df['open'] / df['close'].shift(1))
+        log_oc_sq = log_oc ** 2
+        
+        log_cc = np.log(df['close'] / df['close'].shift(1))
+        log_cc_sq = log_cc ** 2
+        
+        rs = log_ho * (log_ho - log_co) + log_lo * (log_lo - log_co)
+        
+        k = 0.34 / (1.34 + (window + 1) / (window - 1))
+        
+        # Componentes
+        open_vol = log_oc_sq.rolling(window).mean()
+        close_vol = log_cc_sq.rolling(window).mean()
+        rs_vol = rs.rolling(window).mean()
+        
+        yz = np.sqrt(open_vol + k * close_vol + (1 - k) * rs_vol)
+        
+        return yz
+    
+    @staticmethod
+    def parkinson(df: pd.DataFrame, window: int = 20) -> pd.Series:
+        """Parkinson estimator - usa apenas high/low."""
+        hl_ratio = np.log(df['high'] / df['low']) ** 2
+        factor = 1 / (4 * np.log(2))
+        
+        return np.sqrt(factor * hl_ratio.rolling(window).mean())
+    
+    @staticmethod
+    def realized_volatility(df: pd.DataFrame, window: int = 20) -> pd.Series:
+        """Volatilidade realizada clássica."""
+        returns = np.log(df['close'] / df['close'].shift(1))
+        return returns.rolling(window).std() * np.sqrt(252)  # Anualizada
 
+
+class AdaptiveLabeler:
+    """
+    Sistema de rotulagem adaptativo baseado em volatilidade.
+    Substitui o Triple Barrier por um sistema mais robusto e interpretável.
+    Suporta múltiplos horizontes alinhados com timeframe de 15m.
+    
+    Formula: label = sign(r_future) if |r_future| > τ else 0
+    onde τ = k × σ̂ × sqrt(horizon)
+    """
+    
     def __init__(
         self,
-        pt_multiplier: float = 2.0,
-        sl_multiplier: float = 1.5,
-        max_holding_period: int = 100,
-        min_ret: float = 0.0001,
-        use_atr: bool = True,
-        parallel: bool = False,
+        horizon_bars: int = 1,
+        k: float = 1.0,
+        vol_estimator: str = 'yang_zhang',
+        vol_window: int = 20,
+        neutral_zone: bool = True,
+        min_threshold: float = 0.001,
+        max_threshold: float = 0.10
     ):
-        """Inicializa o labeler.
-        
-        Args:
-            pt_multiplier: Multiplicador para take profit (ATR ou fixo)
-            sl_multiplier: Multiplicador para stop loss (ATR ou fixo)
-            max_holding_period: Período máximo de holding (barras)
-            min_ret: Retorno mínimo para considerar como sinal
-            use_atr: Se True usa ATR, senão usa percentual fixo
-            parallel: Se True usa processamento paralelo
         """
-        self.pt_multiplier = pt_multiplier
-        self.sl_multiplier = sl_multiplier
-        self.max_holding_period = max_holding_period
-        self.min_ret = min_ret
-        self.use_atr = use_atr
-        self.parallel = parallel
-
-    def apply_triple_barrier(
-        self, df: pd.DataFrame, side: Optional[pd.Series] = None
-    ) -> Tuple[pd.DataFrame, List[Dict]]:
-        """Aplica triple barrier nos dados.
+        Inicializa o labeler adaptativo.
         
         Args:
-            df: DataFrame com OHLCV e opcionalmente ATR
-            side: Série com direção esperada (1=long, -1=short, 0=flat)
-                  Se None, assume sempre long
-                  
+            horizon_bars: Janela futura para calcular retorno (em barras)
+            k: Multiplicador do threshold (hiperparâmetro a otimizar)
+            vol_estimator: Estimador de volatilidade a usar
+            vol_window: Janela para cálculo de volatilidade
+            neutral_zone: Se True, cria zona morta entre thresholds
+            min_threshold: Threshold mínimo permitido
+            max_threshold: Threshold máximo permitido
+        """
+        self.horizon_bars = horizon_bars
+        self.k = k
+        self.vol_estimator = vol_estimator
+        self.vol_window = vol_window
+        self.neutral_zone = neutral_zone
+        self.min_threshold = min_threshold
+        self.max_threshold = max_threshold
+        self.volatility_estimators = VolatilityEstimators()
+        
+        # Mapeamento de horizontes em minutos para bars de 15m
+        self.horizon_map = {
+            '15m': 1,    # 15 minutos = 1 bar
+            '30m': 2,    # 30 minutos = 2 bars
+            '60m': 4,    # 60 minutos = 4 bars
+            '120m': 8,   # 120 minutos = 8 bars
+            '240m': 16,  # 240 minutos = 16 bars
+            '480m': 32   # 480 minutos = 32 bars
+        }
+        
+        log.info(
+            "adaptive_labeler_initialized",
+            horizon_bars=horizon_bars,
+            k=k,
+            vol_estimator=vol_estimator,
+            neutral_zone=neutral_zone
+        )
+    
+    def calculate_volatility(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Calcula volatilidade usando estimador selecionado.
+        
+        Args:
+            df: DataFrame com OHLC
+            
+        Returns:
+            Series com volatilidade estimada
+        """
+        estimator_map = {
+            'atr': self.volatility_estimators.atr,
+            'garman_klass': self.volatility_estimators.garman_klass,
+            'yang_zhang': self.volatility_estimators.yang_zhang,
+            'parkinson': self.volatility_estimators.parkinson,
+            'realized': self.volatility_estimators.realized_volatility
+        }
+        
+        if self.vol_estimator not in estimator_map:
+            raise ValueError(f"Estimador {self.vol_estimator} não suportado")
+        
+        return estimator_map[self.vol_estimator](df, self.vol_window)
+    
+    def calculate_adaptive_threshold(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Calcula threshold adaptativo baseado em volatilidade.
+        
+        Formula: τ = k × σ̂ × sqrt(horizon)
+        
+        Args:
+            df: DataFrame com dados OHLC
+            
+        Returns:
+            Series com threshold adaptativo para cada barra
+        """
+        # Calcular volatilidade
+        volatility = self.calculate_volatility(df)
+        
+        # Ajustar pelo horizonte (raiz quadrada do tempo)
+        horizon_adjustment = np.sqrt(self.horizon_bars)
+        
+        # Calcular threshold
+        threshold = self.k * volatility * horizon_adjustment
+        
+        # Aplicar limites
+        threshold = threshold.clip(lower=self.min_threshold, upper=self.max_threshold)
+        
+        return threshold
+    
+    def create_labels(
+        self, 
+        df: pd.DataFrame,
+        return_column: Optional[str] = None
+    ) -> Tuple[pd.DataFrame, Dict]:
+        """
+        Cria labels baseados em threshold adaptativo.
+        
+        Args:
+            df: DataFrame com dados OHLC
+            return_column: Coluna opcional com retornos futuros pré-calculados
+            
         Returns:
             Tupla com:
             - DataFrame com labels adicionados
-            - Lista com informações detalhadas das barreiras
+            - Dicionário com estatísticas
         """
         log.info(
-            "applying_triple_barrier",
+            "creating_adaptive_labels",
             rows=len(df),
-            use_atr=self.use_atr,
-            max_holding=self.max_holding_period,
+            horizon_bars=self.horizon_bars,
+            vol_estimator=self.vol_estimator
         )
         
-        # Calcular ATR se necessário e não existir
-        if self.use_atr and "atr_14" not in df.columns:
-            df["atr_14"] = ta.volatility.AverageTrueRange(
-                df["high"], df["low"], df["close"], window=14
-            ).average_true_range()
-            log.info("atr_calculated")
+        df = df.copy()
         
-        # Se side não fornecido, assume sempre long
-        if side is None:
-            side = pd.Series(1, index=df.index)
-        
-        # Aplicar barreiras
-        if self.parallel:
-            labels, barrier_info = self._apply_parallel(df, side)
+        # Calcular retorno futuro se não fornecido
+        if return_column is None:
+            df['future_return'] = (
+                df['close'].shift(-self.horizon_bars) / df['close'] - 1
+            )
         else:
-            labels, barrier_info = self._apply_sequential(df, side)
+            df['future_return'] = df[return_column]
         
-        # Adicionar labels ao DataFrame
-        df["label"] = labels
+        # Calcular threshold adaptativo
+        df['threshold'] = self.calculate_adaptive_threshold(df)
         
-        # Adicionar meta-labels (binário)
-        df["meta_label"] = (df["label"] != 0).astype(int)
+        # Criar labels
+        df['label'] = 0  # Inicializar como neutro
+        
+        if self.neutral_zone:
+            # Com zona neutra: -1, 0, 1
+            df.loc[df['future_return'] > df['threshold'], 'label'] = 1   # Long
+            df.loc[df['future_return'] < -df['threshold'], 'label'] = -1 # Short
+        else:
+            # Sem zona neutra: apenas -1, 1
+            df.loc[df['future_return'] > 0, 'label'] = 1   # Long
+            df.loc[df['future_return'] <= 0, 'label'] = -1 # Short
+        
+        # Remover últimas barras sem label (sem futuro conhecido)
+        df.loc[df.index[-self.horizon_bars:], 'label'] = np.nan
         
         # Estatísticas
-        label_counts = df["label"].value_counts()
+        stats = self.get_label_statistics(df)
+        
         log.info(
             "labels_created",
-            total=len(labels),
-            long_wins=label_counts.get(1, 0),
-            losses=label_counts.get(-1, 0),
-            neutrals=label_counts.get(0, 0),
+            total=stats['total_samples'],
+            long_pct=stats['long_rate'],
+            short_pct=stats['short_rate'],
+            neutral_pct=stats['neutral_rate'],
+            avg_threshold=df['threshold'].mean()
         )
         
-        return df, barrier_info
-
-    def _apply_sequential(self, df: pd.DataFrame, side: pd.Series) -> Tuple[List, List]:
-        """Aplica barreiras sequencialmente."""
-        labels = []
-        barrier_info = []
-        
-        n = len(df)
-        
-        for i in range(n - 1):
-            # Skip se side é neutro
-            if side.iloc[i] == 0:
-                labels.append(0)
-                barrier_info.append({
-                    "entry_idx": i,
-                    "exit_idx": i,
-                    "entry_price": df["close"].iloc[i],
-                    "exit_price": df["close"].iloc[i],
-                    "label": 0,
-                    "exit_reason": "no_position",
-                })
-                continue
-            
-            # Calcular barreiras para esta posição
-            result = self._calculate_barrier_touch(
-                df, i, side.iloc[i], min(i + self.max_holding_period, n - 1)
-            )
-            
-            labels.append(result["label"])
-            barrier_info.append(result)
-        
-        # Última barra sempre neutra (não há futuro para avaliar)
-        labels.append(0)
-        barrier_info.append({
-            "entry_idx": n - 1,
-            "exit_idx": n - 1,
-            "label": 0,
-            "exit_reason": "end_of_data",
-        })
-        
-        return labels, barrier_info
-
-    def _apply_parallel(self, df: pd.DataFrame, side: pd.Series) -> Tuple[List, List]:
-        """Aplica barreiras em paralelo usando multiprocessing."""
-        n = len(df)
-        
-        # Função parcial com DataFrame fixo
-        calc_func = partial(self._calculate_barrier_touch_wrapper, df=df, side=side)
-        
-        # Criar índices para processar
-        indices = list(range(n - 1))
-        
-        # Processar em paralelo
-        results = [None] * n
-        
-        with ProcessPoolExecutor() as executor:
-            futures = {executor.submit(calc_func, i): i for i in indices}
-            
-            for future in as_completed(futures):
-                idx = futures[future]
-                results[idx] = future.result()
-        
-        # Última barra
-        results[n - 1] = {
-            "label": 0,
-            "entry_idx": n - 1,
-            "exit_idx": n - 1,
-            "exit_reason": "end_of_data",
-        }
-        
-        # Separar labels e barrier_info
-        labels = [r["label"] for r in results]
-        barrier_info = results
-        
-        return labels, barrier_info
-
-    def _calculate_barrier_touch_wrapper(self, i: int, df: pd.DataFrame, side: pd.Series) -> Dict:
-        """Wrapper para cálculo paralelo."""
-        if side.iloc[i] == 0:
-            return {
-                "entry_idx": i,
-                "exit_idx": i,
-                "label": 0,
-                "exit_reason": "no_position",
-            }
-        
-        return self._calculate_barrier_touch(
-            df, i, side.iloc[i], min(i + self.max_holding_period, len(df) - 1)
-        )
-
-    def _calculate_barrier_touch(
-        self, df: pd.DataFrame, entry_idx: int, side: int, max_idx: int
-    ) -> Dict:
-        """Calcula qual barreira é tocada primeiro.
-        
-        Args:
-            df: DataFrame com dados
-            entry_idx: Índice de entrada
-            side: Direção (1=long, -1=short)
-            max_idx: Índice máximo (barreira de tempo)
-            
-        Returns:
-            Dicionário com informações da barreira tocada
-        """
-        entry_price = df["close"].iloc[entry_idx]
-        
-        # Calcular níveis das barreiras
-        if self.use_atr:
-            atr = df["atr_14"].iloc[entry_idx]
-            if pd.isna(atr) or atr <= 0:
-                atr = df["close"].iloc[entry_idx] * 0.02  # Fallback 2%
-            
-            pt_distance = self.pt_multiplier * atr
-            sl_distance = self.sl_multiplier * atr
-        else:
-            # Usar percentual fixo
-            pt_distance = entry_price * self.pt_multiplier / 100
-            sl_distance = entry_price * self.sl_multiplier / 100
-        
-        # Definir barreiras baseado no side
-        if side == 1:  # Long
-            pt_barrier = entry_price + pt_distance
-            sl_barrier = entry_price - sl_distance
-        else:  # Short
-            pt_barrier = entry_price - pt_distance
-            sl_barrier = entry_price + sl_distance
-        
-        # Procurar qual barreira é tocada primeiro
-        for j in range(entry_idx + 1, max_idx + 1):
-            high = df["high"].iloc[j]
-            low = df["low"].iloc[j]
-            
-            # Para posição long
-            if side == 1:
-                # Check take profit
-                if high >= pt_barrier:
-                    return {
-                        "entry_idx": entry_idx,
-                        "exit_idx": j,
-                        "entry_price": entry_price,
-                        "exit_price": pt_barrier,
-                        "pt_barrier": pt_barrier,
-                        "sl_barrier": sl_barrier,
-                        "label": 1,
-                        "exit_reason": "take_profit",
-                        "return": (pt_barrier - entry_price) / entry_price,
-                    }
-                
-                # Check stop loss
-                if low <= sl_barrier:
-                    return {
-                        "entry_idx": entry_idx,
-                        "exit_idx": j,
-                        "entry_price": entry_price,
-                        "exit_price": sl_barrier,
-                        "pt_barrier": pt_barrier,
-                        "sl_barrier": sl_barrier,
-                        "label": -1,
-                        "exit_reason": "stop_loss",
-                        "return": (sl_barrier - entry_price) / entry_price,
-                    }
-            
-            # Para posição short
-            else:
-                # Check take profit (preço caindo)
-                if low <= pt_barrier:
-                    return {
-                        "entry_idx": entry_idx,
-                        "exit_idx": j,
-                        "entry_price": entry_price,
-                        "exit_price": pt_barrier,
-                        "pt_barrier": pt_barrier,
-                        "sl_barrier": sl_barrier,
-                        "label": 1,
-                        "exit_reason": "take_profit",
-                        "return": (entry_price - pt_barrier) / entry_price,
-                    }
-                
-                # Check stop loss (preço subindo)
-                if high >= sl_barrier:
-                    return {
-                        "entry_idx": entry_idx,
-                        "exit_idx": j,
-                        "entry_price": entry_price,
-                        "exit_price": sl_barrier,
-                        "pt_barrier": pt_barrier,
-                        "sl_barrier": sl_barrier,
-                        "label": -1,
-                        "exit_reason": "stop_loss",
-                        "return": (entry_price - sl_barrier) / entry_price,
-                    }
-        
-        # Barreira de tempo atingida
-        exit_price = df["close"].iloc[max_idx]
-        
-        if side == 1:
-            ret = (exit_price - entry_price) / entry_price
-        else:
-            ret = (entry_price - exit_price) / entry_price
-        
-        # Classificar baseado no retorno
-        if ret > self.min_ret:
-            label = 1
-        elif ret < -self.min_ret:
-            label = -1
-        else:
-            label = 0
-        
-        return {
-            "entry_idx": entry_idx,
-            "exit_idx": max_idx,
-            "entry_price": entry_price,
-            "exit_price": exit_price,
-            "pt_barrier": pt_barrier,
-            "sl_barrier": sl_barrier,
-            "label": label,
-            "exit_reason": "max_holding",
-            "return": ret,
-        }
-
-    def calculate_sample_weights(
-        self, df: pd.DataFrame, barrier_info: List[Dict]
-    ) -> np.ndarray:
-        """Calcula pesos de amostra baseado em unicidade e retorno.
-        
-        Implementa o conceito de "uniqueness" do livro de López de Prado:
-        - Eventos que se sobrepõem compartilham informação
-        - Eventos únicos têm maior peso
-        - Decaimento temporal para dar mais peso a eventos recentes
-        
-        Args:
-            df: DataFrame com dados
-            barrier_info: Lista com informações das barreiras
-            
-        Returns:
-            Array com pesos normalizados
-        """
-        n = len(barrier_info)
-        weights = np.ones(n)
-        
-        # 1. Peso por unicidade (eventos não sobrepostos)
-        overlap_matrix = np.zeros((n, n))
-        
-        for i in range(n):
-            for j in range(i + 1, n):
-                # Verificar sobreposição temporal
-                if self._check_overlap(barrier_info[i], barrier_info[j]):
-                    overlap_matrix[i, j] = 1
-                    overlap_matrix[j, i] = 1
-        
-        # Calcular unicidade (inverso do número de sobreposições)
-        overlaps = overlap_matrix.sum(axis=1)
-        uniqueness = 1 / (1 + overlaps)
-        weights *= uniqueness
-        
-        # 2. Peso por retorno absoluto (eventos com maior movimento são mais informativos)
-        returns = np.array([abs(info.get("return", 0)) for info in barrier_info])
-        returns_normalized = returns / (returns.max() + 1e-10)
-        weights *= (0.5 + 0.5 * returns_normalized)  # Peso entre 0.5 e 1.0
-        
-        # 3. Decaimento temporal exponencial
-        decay_factor = 0.99
-        time_weights = decay_factor ** np.arange(n - 1, -1, -1)
-        weights *= time_weights
-        
-        # 4. Peso por tipo de saída (opcional)
-        # Dar mais peso para sinais claros (TP/SL) vs timeout
-        exit_weights = np.array([
-            1.2 if info["exit_reason"] in ["take_profit", "stop_loss"] else 0.8
-            for info in barrier_info
-        ])
-        weights *= exit_weights
-        
-        # Normalizar para que a soma seja igual ao número de amostras
-        weights = weights / weights.sum() * n
-        
-        log.info(
-            "sample_weights_calculated",
-            min_weight=weights.min(),
-            max_weight=weights.max(),
-            mean_weight=weights.mean(),
-            std_weight=weights.std(),
-        )
-        
-        return weights
-
-    def _check_overlap(self, event1: Dict, event2: Dict) -> bool:
-        """Verifica se dois eventos se sobrepõem no tempo."""
-        start1, end1 = event1["entry_idx"], event1["exit_idx"]
-        start2, end2 = event2["entry_idx"], event2["exit_idx"]
-        
-        # Eventos se sobrepõem se um começa antes do outro terminar
-        return (start1 <= end2) and (start2 <= end1)
-
+        return df, stats
+    
     def get_label_statistics(self, df: pd.DataFrame) -> Dict:
-        """Calcula estatísticas dos labels.
+        """
+        Calcula estatísticas dos labels.
         
         Args:
             df: DataFrame com coluna 'label'
@@ -404,67 +258,175 @@ class TripleBarrierLabeler:
         Returns:
             Dicionário com estatísticas
         """
-        if "label" not in df.columns:
+        if 'label' not in df.columns:
             raise ValueError("DataFrame não tem coluna 'label'")
         
-        label_counts = df["label"].value_counts()
-        total = len(df["label"].dropna())
+        # Remover NaN para estatísticas
+        labels = df['label'].dropna()
+        total = len(labels)
+        
+        if total == 0:
+            return {
+                'total_samples': 0,
+                'long_count': 0,
+                'short_count': 0,
+                'neutral_count': 0,
+                'long_rate': 0.0,
+                'short_rate': 0.0,
+                'neutral_rate': 0.0,
+                'class_balance': 0.0
+            }
+        
+        label_counts = labels.value_counts()
         
         stats = {
-            "total_samples": total,
-            "long_wins": label_counts.get(1, 0),
-            "losses": label_counts.get(-1, 0),
-            "neutrals": label_counts.get(0, 0),
-            "long_win_rate": label_counts.get(1, 0) / total if total > 0 else 0,
-            "loss_rate": label_counts.get(-1, 0) / total if total > 0 else 0,
-            "neutral_rate": label_counts.get(0, 0) / total if total > 0 else 0,
-            "class_imbalance": max(label_counts.values()) / min(label_counts.values())
-            if len(label_counts) > 1 else np.inf,
+            'total_samples': total,
+            'long_count': int(label_counts.get(1, 0)),
+            'short_count': int(label_counts.get(-1, 0)),
+            'neutral_count': int(label_counts.get(0, 0)),
+            'long_rate': float(label_counts.get(1, 0) / total),
+            'short_rate': float(label_counts.get(-1, 0) / total),
+            'neutral_rate': float(label_counts.get(0, 0) / total)
         }
         
+        # Calcular balanço entre classes (excluindo neutro se existir)
+        non_neutral = label_counts.get(1, 0) + label_counts.get(-1, 0)
+        if non_neutral > 0:
+            stats['class_balance'] = float(
+                min(label_counts.get(1, 0), label_counts.get(-1, 0)) / 
+                max(label_counts.get(1, 0), label_counts.get(-1, 0))
+            )
+        else:
+            stats['class_balance'] = 0.0
+        
+        # Adicionar estatísticas de threshold se disponível
+        if 'threshold' in df.columns:
+            threshold_clean = df['threshold'].dropna()
+            stats.update({
+                'threshold_mean': float(threshold_clean.mean()),
+                'threshold_std': float(threshold_clean.std()),
+                'threshold_min': float(threshold_clean.min()),
+                'threshold_max': float(threshold_clean.max())
+            })
+        
         return stats
-
-    def create_side_prediction(self, df: pd.DataFrame, method: str = "momentum") -> pd.Series:
-        """Cria predição de side (direção) para o triple barrier.
+    
+    def calculate_sample_weights(
+        self, 
+        df: pd.DataFrame,
+        method: str = 'balanced'
+    ) -> np.ndarray:
+        """
+        Calcula pesos de amostra para lidar com desbalanceamento.
+        
+        Args:
+            df: DataFrame com labels
+            method: Método de peso ('balanced', 'sqrt', 'none')
+            
+        Returns:
+            Array com pesos normalizados
+        """
+        if 'label' not in df.columns:
+            raise ValueError("DataFrame precisa ter coluna 'label'")
+        
+        labels = df['label'].values
+        n = len(labels)
+        
+        if method == 'none':
+            return np.ones(n)
+        
+        # Calcular pesos baseado na frequência das classes
+        unique_labels, counts = np.unique(labels[~np.isnan(labels)], return_counts=True)
+        
+        if len(unique_labels) == 0:
+            return np.ones(n)
+        
+        # Criar mapa de pesos
+        total_samples = counts.sum()
+        n_classes = len(unique_labels)
+        
+        if method == 'balanced':
+            # Peso inversamente proporcional à frequência
+            class_weights = total_samples / (n_classes * counts)
+        elif method == 'sqrt':
+            # Raiz quadrada do peso balanceado (menos agressivo)
+            class_weights = np.sqrt(total_samples / (n_classes * counts))
+        else:
+            raise ValueError(f"Método {method} não suportado")
+        
+        # Mapear pesos para cada amostra
+        weight_map = dict(zip(unique_labels, class_weights))
+        weights = np.array([
+            weight_map.get(label, 1.0) if not np.isnan(label) else 0.0 
+            for label in labels
+        ])
+        
+        # Normalizar para que a soma seja igual ao número de amostras não-NaN
+        non_nan_count = np.sum(~np.isnan(labels))
+        if weights.sum() > 0:
+            weights = weights / weights.sum() * non_nan_count
+        
+        log.info(
+            "sample_weights_calculated",
+            method=method,
+            min_weight=weights.min(),
+            max_weight=weights.max(),
+            mean_weight=weights.mean()
+        )
+        
+        return weights
+    
+    def optimize_k(
+        self,
+        df: pd.DataFrame,
+        k_values: List[float],
+        metric: str = 'balanced_accuracy'
+    ) -> Tuple[float, Dict]:
+        """
+        Otimiza o valor de k usando grid search.
         
         Args:
             df: DataFrame com dados
-            method: Método para prever direção
-                   - "momentum": Baseado em momentum
-                   - "mean_reversion": Baseado em reversão à média
-                   - "trend": Baseado em tendência de médias móveis
-                   
+            k_values: Lista de valores de k para testar
+            metric: Métrica para otimizar
+            
         Returns:
-            Série com predições de side (1, -1, 0)
+            Tupla com melhor k e resultados
         """
-        if method == "momentum":
-            # Momentum simples de 20 períodos
-            momentum = df["close"].pct_change(20)
-            side = pd.Series(0, index=df.index)
-            side[momentum > 0.01] = 1   # Long se momentum positivo
-            side[momentum < -0.01] = -1  # Short se momentum negativo
-            
-        elif method == "mean_reversion":
-            # Z-score de 50 períodos
-            mean = df["close"].rolling(50).mean()
-            std = df["close"].rolling(50).std()
-            zscore = (df["close"] - mean) / std
-            
-            side = pd.Series(0, index=df.index)
-            side[zscore < -2] = 1   # Long se muito abaixo da média
-            side[zscore > 2] = -1   # Short se muito acima da média
-            
-        elif method == "trend":
-            # Cruzamento de médias móveis
-            sma_fast = df["close"].rolling(20).mean()
-            sma_slow = df["close"].rolling(50).mean()
-            
-            side = pd.Series(0, index=df.index)
-            side[sma_fast > sma_slow] = 1   # Long se tendência de alta
-            side[sma_fast < sma_slow] = -1  # Short se tendência de baixa
-            
-        else:
-            # Método padrão: sempre long
-            side = pd.Series(1, index=df.index)
+        results = {}
         
-        return side
+        for k in k_values:
+            self.k = k
+            df_labeled, stats = self.create_labels(df)
+            
+            # Calcular métrica baseada na distribuição de labels
+            if metric == 'balanced_accuracy':
+                # Penalizar distribuições muito desbalanceadas
+                score = stats['class_balance']
+            elif metric == 'coverage':
+                # Maximizar cobertura (minimizar neutros)
+                score = 1.0 - stats['neutral_rate']
+            else:
+                score = 0.0
+            
+            results[k] = {
+                'score': score,
+                'stats': stats
+            }
+        
+        # Encontrar melhor k
+        best_k = max(results.keys(), key=lambda k: results[k]['score'])
+        self.k = best_k
+        
+        log.info(
+            "k_optimized",
+            best_k=best_k,
+            best_score=results[best_k]['score'],
+            metric=metric
+        )
+        
+        return best_k, results
+
+
+# Manter compatibilidade com código existente
+TripleBarrierLabeler = AdaptiveLabeler  # Alias temporário para migração suave

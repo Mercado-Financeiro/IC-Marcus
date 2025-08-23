@@ -14,7 +14,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from src.data.binance_loader import CryptoDataLoader
 from src.features.engineering import FeatureEngineer
-from src.features.labels import TripleBarrierLabeler
+from src.features.labels import AdaptiveLabeler
 from src.models.xgb_optuna import XGBoostOptuna
 from src.backtest.engine import BacktestEngine
 from src.data.splits import PurgedKFold
@@ -91,7 +91,7 @@ class TestPipelineE2E:
             index=dates
         )
         
-        labeler = TripleBarrierLabeler()
+        labeler = AdaptiveLabeler()
         labels, weights = labeler.fit_transform(
             prices,
             pt=0.02,
@@ -209,7 +209,7 @@ class TestPipelineE2E:
         features = engineer.fit_transform(data)
         
         # 3. Create labels
-        labeler = TripleBarrierLabeler()
+        labeler = AdaptiveLabeler()
         labels, weights = labeler.fit_transform(
             data['close'],
             pt=0.02,
