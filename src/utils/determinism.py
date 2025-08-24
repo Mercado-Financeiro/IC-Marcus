@@ -34,7 +34,7 @@ def set_deterministic_environment(seed: int = 42):
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-        print(f"✅ PyTorch configurado para determinismo (seed={seed})")
+        print(f"[OK] PyTorch configurado para determinismo (seed={seed})")
     except ImportError:
         pass
     
@@ -42,11 +42,11 @@ def set_deterministic_environment(seed: int = 42):
     try:
         import tensorflow as tf
         tf.random.set_seed(seed)
-        print(f"✅ TensorFlow configurado para determinismo (seed={seed})")
+        print(f"[OK] TensorFlow configurado para determinismo (seed={seed})")
     except ImportError:
         pass
     
-    print(f"✅ Ambiente determinístico configurado (SEED={seed})")
+    print(f"[OK] Ambiente determinístico configurado (SEED={seed})")
     
     return seed
 

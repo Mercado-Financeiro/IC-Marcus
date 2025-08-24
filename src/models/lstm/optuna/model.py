@@ -6,16 +6,23 @@ from typing import Tuple
 
 
 class LSTMModel(nn.Module):
-    """LSTM model for time series classification."""
-    
+    """LSTM model for time series classification.
+
+    Extended to optionally support layer normalization and a simple residual
+    connection from the last input vector into the post-LSTM representation.
+    """
+
     def __init__(
-        self, 
-        input_size: int, 
-        hidden_size: int, 
-        num_layers: int, 
-        dropout: float, 
+        self,
+        input_size: int,
+        hidden_size: int,
+        num_layers: int,
+        dropout: float,
         output_size: int = 1,
-        bidirectional: bool = False
+        bidirectional: bool = False,
+        use_sigmoid: bool = False,  # For BCEWithLogitsLoss, set to False
+        use_layer_norm: bool = False,
+        use_residual: bool = False,
     ):
         """
         Initialize LSTM model.
@@ -46,13 +53,26 @@ class LSTMModel(nn.Module):
         
         # Dropout layer
         self.dropout = nn.Dropout(dropout)
-        
+
+        # Optional LayerNorm on the last hidden representation
+        self.use_layer_norm = use_layer_norm
+        ln_dim = hidden_size * (2 if bidirectional else 1)
+        self.layer_norm = nn.LayerNorm(ln_dim) if use_layer_norm else None
+
         # Fully connected layer
         fc_input_size = hidden_size * 2 if bidirectional else hidden_size
         self.fc = nn.Linear(fc_input_size, output_size)
-        
-        # Activation for binary classification
-        self.sigmoid = nn.Sigmoid()
+
+        # Activation for binary classification (optional)
+        self.use_sigmoid = use_sigmoid
+        self.sigmoid = nn.Sigmoid() if use_sigmoid else None
+
+        # Optional residual connection from input (last time step)
+        self.use_residual = use_residual
+        self.residual_proj = None
+        if use_residual:
+            # Project last input to hidden dimension (match bi/uni dir)
+            self.residual_proj = nn.Linear(input_size, fc_input_size)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -66,18 +86,28 @@ class LSTMModel(nn.Module):
         """
         # LSTM forward pass
         lstm_out, (h_n, c_n) = self.lstm(x)
-        
+
         # Use last hidden state
         last_hidden = lstm_out[:, -1, :]
-        
+
+        # Optional residual from last input
+        if self.use_residual and self.residual_proj is not None:
+            last_input = x[:, -1, :]
+            last_hidden = last_hidden + self.residual_proj(last_input)
+
+        # Optional layer normalization
+        if self.layer_norm is not None:
+            last_hidden = self.layer_norm(last_hidden)
+
         # Apply dropout
         out = self.dropout(last_hidden)
         
         # Fully connected layer
         out = self.fc(out)
         
-        # Apply sigmoid for binary classification
-        out = self.sigmoid(out)
+        # Apply sigmoid only if configured (not needed for BCEWithLogitsLoss)
+        if self.use_sigmoid and self.sigmoid is not None:
+            out = self.sigmoid(out)
         
         return out
     
@@ -117,7 +147,8 @@ class AttentionLSTM(nn.Module):
         hidden_size: int,
         num_layers: int,
         dropout: float,
-        output_size: int = 1
+        output_size: int = 1,
+        num_heads: int = 1  # kept for API compatibility; not used in this simple attention
     ):
         """
         Initialize Attention LSTM model.
@@ -143,7 +174,8 @@ class AttentionLSTM(nn.Module):
             batch_first=True
         )
         
-        # Attention layer
+        # Attention layer (single-head additive attention). The num_heads
+        # parameter is accepted for compatibility but unused here.
         self.attention = nn.Linear(hidden_size, 1)
         
         # Dropout

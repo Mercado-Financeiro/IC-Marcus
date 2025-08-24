@@ -41,6 +41,7 @@ class LSTMOptunaConfig:
     use_mlflow: bool = False
     seed: int = 42
     device: str = 'auto'  # 'auto', 'cpu', 'cuda'
+    verbose: bool = False
     
     # Validation settings
     threshold_std: float = 0.005
@@ -58,7 +59,8 @@ class LSTMOptunaConfig:
             'batch_size': self.batch_size,
             'seed': self.seed,
             'device': self.device,
-            'use_mlflow': self.use_mlflow
+            'use_mlflow': self.use_mlflow,
+            'verbose': self.verbose
         }
 
 

@@ -10,7 +10,7 @@ log = structlog.get_logger()
 
 
 class LSTMNetwork(nn.Module):
-    """LSTM neural network for time series prediction."""
+    """LSTM neural network for time series prediction with improved loss handling."""
     
     def __init__(
         self,
@@ -19,7 +19,8 @@ class LSTMNetwork(nn.Module):
         num_layers: int = 2,
         dropout: float = 0.2,
         bidirectional: bool = False,
-        output_size: int = 1
+        output_size: int = 1,
+        use_sigmoid: bool = False  # Backward compatibility
     ):
         """Initialize LSTM network.
         
@@ -30,6 +31,7 @@ class LSTMNetwork(nn.Module):
             dropout: Dropout rate
             bidirectional: Use bidirectional LSTM
             output_size: Number of output classes
+            use_sigmoid: Whether to apply sigmoid activation (False for BCEWithLogitsLoss)
         """
         super().__init__()
         
@@ -37,6 +39,8 @@ class LSTMNetwork(nn.Module):
         self.num_layers = num_layers
         self.bidirectional = bidirectional
         self.num_directions = 2 if bidirectional else 1
+        self.use_sigmoid = use_sigmoid
+        self.output_activation = 'sigmoid' if use_sigmoid else None
         
         # LSTM layers
         self.lstm = nn.LSTM(
@@ -109,6 +113,10 @@ class LSTMNetwork(nn.Module):
         out = self.dropout(out)
         out = self.fc2(out)
         
+        # Apply sigmoid if configured (for backward compatibility)
+        if self.use_sigmoid:
+            out = torch.sigmoid(out)
+        
         return out, hidden
     
     def init_hidden(self, batch_size: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -146,7 +154,9 @@ class BaseLSTM:
         num_layers: int = 2,
         dropout: float = 0.2,
         learning_rate: float = 0.001,
-        device: Optional[str] = None
+        device: Optional[str] = None,
+        use_pos_weight: bool = True,  # New: enable pos_weight for imbalanced data
+        use_sigmoid: bool = False  # Backward compatibility
     ):
         """Initialize base LSTM model.
         
@@ -157,12 +167,16 @@ class BaseLSTM:
             dropout: Dropout rate
             learning_rate: Learning rate for optimizer
             device: Device to use ('cuda' or 'cpu')
+            use_pos_weight: Whether to use pos_weight in loss for imbalanced data
+            use_sigmoid: Whether to use sigmoid activation (False for BCEWithLogitsLoss)
         """
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.dropout = dropout
         self.learning_rate = learning_rate
+        self.use_pos_weight = use_pos_weight
+        self.use_sigmoid = use_sigmoid
         
         # Set device
         if device is None:
@@ -175,11 +189,17 @@ class BaseLSTM:
             input_size=input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
-            dropout=dropout
+            dropout=dropout,
+            use_sigmoid=use_sigmoid  # Pass sigmoid flag
         ).to(self.device)
         
         # Loss and optimizer
-        self.criterion = nn.BCEWithLogitsLoss()
+        self.pos_weight = None  # Will be set during training
+        if use_sigmoid:
+            self.criterion = nn.BCELoss()  # For backward compatibility
+        else:
+            self.criterion = nn.BCEWithLogitsLoss()  # Better for training
+        
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
             lr=learning_rate
@@ -193,18 +213,49 @@ class BaseLSTM:
             device=str(self.device)
         )
     
+    def calculate_pos_weight(self, y_train: np.ndarray) -> torch.Tensor:
+        """Calculate positive class weight for imbalanced data.
+        
+        Args:
+            y_train: Training labels
+            
+        Returns:
+            pos_weight tensor
+        """
+        pos_count = y_train.sum()
+        neg_count = len(y_train) - pos_count
+        
+        if pos_count == 0:
+            return torch.tensor(1.0)
+        
+        pos_weight = neg_count / pos_count
+        log.info(
+            "pos_weight_calculated",
+            pos_ratio=float(pos_count/len(y_train)),
+            pos_weight=float(pos_weight)
+        )
+        return torch.tensor(pos_weight, device=self.device)
+    
     def train_epoch(
         self,
-        dataloader: torch.utils.data.DataLoader
+        dataloader: torch.utils.data.DataLoader,
+        y_train: Optional[np.ndarray] = None
     ) -> float:
         """Train for one epoch.
         
         Args:
             dataloader: Training dataloader
+            y_train: Optional training labels to calculate pos_weight
             
         Returns:
             Average loss for the epoch
         """
+        # Calculate and set pos_weight if needed
+        if self.use_pos_weight and y_train is not None and self.pos_weight is None:
+            self.pos_weight = self.calculate_pos_weight(y_train)
+            if isinstance(self.criterion, nn.BCEWithLogitsLoss):
+                self.criterion.pos_weight = self.pos_weight
+        
         self.model.train()
         total_loss = 0
         n_batches = 0

@@ -13,6 +13,9 @@ from pandera import Column, DataFrameSchema, Check
 import structlog
 from pathlib import Path
 
+# Import database cache
+from src.data.database_cache import MarketDataCache
+
 # Configurar logging
 log = structlog.get_logger()
 
@@ -39,15 +42,25 @@ class CryptoDataLoader:
         exchange: str = "binance",
         cache_dir: str = "data/raw",
         use_cache: bool = True,
+        use_database_cache: bool = True,
+        db_cache_path: str = "data/cache/market_data.db",
     ):
         """Inicializa o loader.
         
         Args:
             exchange: Exchange para buscar dados (binance)
-            cache_dir: Diretório para cache local
+            cache_dir: Diretório para cache local (legacy)
             use_cache: Se deve usar cache local
+            use_database_cache: Se deve usar cache em banco de dados (prioritário)
+            db_cache_path: Caminho para o banco de dados SQLite
         """
         self.exchange_name = exchange
+        self.use_database_cache = use_database_cache
+        
+        # Initialize database cache if enabled
+        if self.use_database_cache:
+            self.db_cache = MarketDataCache(db_cache_path)
+            log.info("database_cache_initialized", path=db_cache_path)
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.use_cache = use_cache
@@ -135,13 +148,20 @@ class CryptoDataLoader:
         if validate:
             df = self.validate_data(df)
         
-        # Salvar no cache
+        # Save to both caches
+        # 1. Save to database cache (priority)
+        if self.use_database_cache:
+            rows_saved = self.db_cache.save_data(df, symbol, timeframe)
+            log.info("data_saved_to_db_cache", rows=rows_saved, symbol=symbol)
+        
+        # 2. Save to file cache (legacy)
         if self.use_cache:
             try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
                 df.to_parquet(cache_path)
-                log.info("data_saved_to_cache", path=str(cache_path))
+                log.info("data_saved_to_file_cache", path=str(cache_path))
             except Exception as e:
-                log.warning("cache_save_failed", error=str(e))
+                log.warning("file_cache_save_failed", error=str(e))
         
         return df
 
@@ -402,6 +422,53 @@ class CryptoDataLoader:
         }
         
         return metrics
+    
+    def get_cache_info(self) -> Dict[str, any]:
+        """Get information about cached data.
+        
+        Returns:
+            Dictionary with cache statistics and metadata
+        """
+        if self.use_database_cache:
+            return self.db_cache.get_cache_info()
+        else:
+            # Legacy file cache info
+            cache_dir = Path(self.cache_dir)
+            cache_files = list(cache_dir.glob("*.parquet"))
+            total_size = sum(f.stat().st_size for f in cache_files) / (1024 * 1024)
+            
+            return {
+                'cache_type': 'file',
+                'cache_dir': str(cache_dir),
+                'total_files': len(cache_files),
+                'total_size_mb': round(total_size, 2),
+                'files': [f.name for f in cache_files]
+            }
+    
+    def clear_cache(self, symbol: Optional[str] = None, timeframe: Optional[str] = None):
+        """Clear cached data.
+        
+        Args:
+            symbol: Symbol to clear (None for all)
+            timeframe: Timeframe to clear (None for all)
+        """
+        if self.use_database_cache:
+            self.db_cache.clear_cache(symbol, timeframe)
+            log.info("database_cache_cleared", symbol=symbol, timeframe=timeframe)
+        
+        if self.use_cache:
+            # Clear file cache
+            cache_dir = Path(self.cache_dir)
+            if symbol and timeframe:
+                pattern = f"{symbol.lower()}_{timeframe}_*.parquet"
+            elif symbol:
+                pattern = f"{symbol.lower()}_*.parquet"
+            else:
+                pattern = "*.parquet"
+            
+            for file in cache_dir.glob(pattern):
+                file.unlink()
+                log.info("file_cache_cleared", file=str(file))
 
 
 # Backward compatibility alias

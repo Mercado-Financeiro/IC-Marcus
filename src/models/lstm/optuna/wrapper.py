@@ -12,11 +12,12 @@ class LSTMWrapper(BaseEstimator, ClassifierMixin):
     """Scikit-learn compatible wrapper for LSTM model."""
     
     def __init__(
-        self, 
-        lstm_model: torch.nn.Module, 
-        seq_len: int, 
+        self,
+        lstm_model: torch.nn.Module,
+        seq_len: int,
         device: torch.device,
-        scaler: Optional[object] = None
+        scaler: Optional[object] = None,
+        stride: int = 1,
     ):
         """
         Initialize LSTM wrapper.
@@ -31,6 +32,7 @@ class LSTMWrapper(BaseEstimator, ClassifierMixin):
         self.seq_len = seq_len
         self.device = device
         self.scaler = scaler
+        self.stride = max(1, int(stride))
         
         # Required sklearn classifier attributes
         self._estimator_type = "classifier"
@@ -147,11 +149,11 @@ class LSTMWrapper(BaseEstimator, ClassifierMixin):
             padding = np.tile(X[0], (self.seq_len - len(X), 1))
             X = np.vstack([padding, X])
         
-        # Create sequences
+        # Create sequences with stride
         sequences = []
-        for i in range(len(X) - self.seq_len + 1):
-            sequences.append(X[i:i+self.seq_len])
-        
+        for i in range(0, len(X) - self.seq_len + 1, self.stride):
+            sequences.append(X[i : i + self.seq_len])
+
         return np.array(sequences)
     
     def score(self, X: Union[pd.DataFrame, np.ndarray], y: np.ndarray) -> float:

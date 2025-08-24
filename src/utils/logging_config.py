@@ -77,11 +77,25 @@ class LogConfig:
         else:
             processors.append(ConsoleRenderer())
         
-        # Configure structlog
+        # Configure structlog with version-agnostic logger factory
+        try:
+            # Prefer stdlib factory when available (works across versions)
+            from structlog.stdlib import LoggerFactory as _LoggerFactory  # type: ignore
+            logger_factory = _LoggerFactory()
+        except Exception:
+            # Fallbacks for older/newer structlog distributions
+            logger_factory = getattr(structlog, 'StandardLoggerFactory', None)
+            if callable(logger_factory):
+                logger_factory = logger_factory()
+            else:
+                # Last resort: simple print logger
+                from structlog import PrintLoggerFactory
+                logger_factory = PrintLoggerFactory()
+
         structlog.configure(
             processors=processors,
             context_class=dict,
-            logger_factory=structlog.StandardLoggerFactory(),
+            logger_factory=logger_factory,
             cache_logger_on_first_use=True,
         )
         

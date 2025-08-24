@@ -1,5 +1,6 @@
 """LSTM Optuna optimization orchestrator."""
 
+import gc
 import numpy as np
 import pandas as pd
 import torch
@@ -8,8 +9,6 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from typing import Dict, Tuple, Optional, Any
 import optuna
-from optuna.pruners import MedianPruner, HyperbandPruner
-from optuna.samplers import TPESampler
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import f1_score, precision_recall_curve, auc
@@ -21,6 +20,10 @@ from .training import train_model
 from .utils import (
     get_logger, set_lstm_deterministic, check_constant_predictions,
     create_sequences, get_device, calculate_metrics
+)
+from ....utils.memory_utils import (
+    memory_cleanup, cleanup_after_trial, safe_delete, 
+    cleanup_model, DataLoaderCleanup, log_memory_usage
 )
 
 log = get_logger()
@@ -89,10 +92,23 @@ class LSTMOptuna:
             model, score = self._train_model(X_train, y_train, X_val, y_val, params)
             scores.append(score)
             
+            # Clean up model and data after fold
+            if model is not None:
+                cleanup_model(model)
+            safe_delete(X_train, X_val, y_train, y_val)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+            
             # Report intermediate value for pruning
             trial.report(score, fold)
             if trial.should_prune():
                 raise optuna.TrialPruned()
+        
+        # Final cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
         
         return np.mean(scores)
     
@@ -135,6 +151,14 @@ class LSTMOptuna:
             X_val_tensor = torch.FloatTensor(X_val_seq).to(self.device)
             y_pred = model(X_val_tensor).cpu().numpy().flatten()
             score = f1_score(y_val_seq, (y_pred > 0.5).astype(int), zero_division=0)
+            # Clean up tensor
+            del X_val_tensor
+        
+        # Clean up training data and tensors
+        safe_delete(X_train_seq, y_train_seq, X_val_seq, y_val_seq, X_val_tensor)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
         
         return model, score
     
@@ -295,6 +319,7 @@ class LSTMOptuna:
         # Import here to avoid circular dependency
         from src.data.splits import PurgedKFold
         
+        @cleanup_after_trial
         def objective(trial: optuna.Trial) -> float:
             # Get hyperparameters
             params = self._create_search_space(trial)
@@ -329,68 +354,95 @@ class LSTMOptuna:
                     torch.FloatTensor(y_val)
                 )
                 
-                train_loader = DataLoader(
+                with DataLoaderCleanup(DataLoader(
                     train_dataset,
                     batch_size=params['batch_size'],
                     shuffle=False  # Important for time series
-                )
-                val_loader = DataLoader(
+                )) as train_loader, DataLoaderCleanup(DataLoader(
                     val_dataset,
                     batch_size=params['batch_size'],
                     shuffle=False
-                )
+                )) as val_loader:
+                    
+                    # Create model
+                    model = self._create_model(params, X_seq.shape[-1])
+                    
+                    # Create optimizer and criterion
+                    optimizer = optim.Adam(
+                        model.parameters(),
+                        lr=params['learning_rate'],
+                        weight_decay=params['weight_decay']
+                    )
+                    # Calculate pos_weight for imbalanced data
+                    pos_count = y_train.sum()
+                    neg_count = len(y_train) - pos_count
+                    pos_weight = torch.tensor(neg_count / pos_count if pos_count > 0 else 1.0).to(self.device)
+                    
+                    # Use BCEWithLogitsLoss for better numerical stability
+                    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+                    
+                    # Train model
+                    history = train_model(
+                        model=model,
+                        train_loader=train_loader,
+                        val_loader=val_loader,
+                        criterion=criterion,
+                        optimizer=optimizer,
+                        device=self.device,
+                        n_epochs=self.config.max_epochs,
+                        early_stopping_patience=self.config.early_stopping_patience,
+                        gradient_clip=params['gradient_clip'],
+                        verbose=False
+                    )
                 
-                # Create model
-                model = self._create_model(params, X_seq.shape[-1])
+                    # Get validation predictions
+                    model.eval()
+                    val_preds = []
+                    with torch.no_grad():
+                        for batch_X, _ in val_loader:
+                            batch_X = batch_X.to(self.device)
+                            outputs = model(batch_X)
+                            val_preds.extend(outputs.cpu().numpy().flatten())
+                            # Clean up batch tensor
+                            del batch_X, outputs
+                    
+                    val_preds = np.array(val_preds)
+                    
+                    # Check for constant predictions
+                    if check_constant_predictions(val_preds):
+                        return 0.0
+                    
+                    # Calculate F1 score
+                    val_pred_binary = (val_preds >= 0.5).astype(int)
+                    score = f1_score(y_val, val_pred_binary)
+                    cv_scores.append(score)
+                    
+                    # Report intermediate value for pruning
+                    trial.report(score, fold)
                 
-                # Create optimizer and criterion
-                optimizer = optim.Adam(
-                    model.parameters(),
-                    lr=params['learning_rate'],
-                    weight_decay=params['weight_decay']
-                )
-                criterion = nn.BCELoss()
-                
-                # Train model
-                history = train_model(
-                    model=model,
-                    train_loader=train_loader,
-                    val_loader=val_loader,
-                    criterion=criterion,
-                    optimizer=optimizer,
-                    device=self.device,
-                    n_epochs=self.config.max_epochs,
-                    early_stopping_patience=self.config.early_stopping_patience,
-                    gradient_clip=params['gradient_clip'],
-                    verbose=False
-                )
-                
-                # Get validation predictions
-                model.eval()
-                val_preds = []
-                with torch.no_grad():
-                    for batch_X, _ in val_loader:
-                        batch_X = batch_X.to(self.device)
-                        outputs = model(batch_X)
-                        val_preds.extend(outputs.cpu().numpy().flatten())
-                
-                val_preds = np.array(val_preds)
-                
-                # Check for constant predictions
-                if check_constant_predictions(val_preds):
-                    return 0.0
-                
-                # Calculate F1 score
-                val_pred_binary = (val_preds >= 0.5).astype(int)
-                score = f1_score(y_val, val_pred_binary)
-                cv_scores.append(score)
-                
-                # Report intermediate value for pruning
-                trial.report(score, fold)
-                
-                # Handle pruning
-                if trial.should_prune():
-                    raise optuna.TrialPruned()
+                    # Handle pruning
+                    if trial.should_prune():
+                        # Clean up memory before pruning
+                        cleanup_model(model)
+                        safe_delete(optimizer, criterion, train_dataset, val_dataset)
+                        safe_delete(X_train, X_val, y_train, y_val, val_preds)
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        gc.collect()
+                        raise optuna.TrialPruned()
+                    
+                    # Clean up after each fold
+                    cleanup_model(model)
+                    safe_delete(optimizer, criterion, train_dataset, val_dataset, val_preds)
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    gc.collect()
+            
+            # Final cleanup after all folds
+            del X_seq, y_seq
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
             
             return np.mean(cv_scores)
         
@@ -416,12 +468,19 @@ class LSTMOptuna:
             sampler=TPESampler(seed=self.config.seed)
         )
         
-        # Create and optimize objective
+        # Create and optimize objective with memory management
         objective = self._create_objective(X, y)
+        
+        # Add memory monitoring callback
+        def memory_callback(study, trial):
+            if trial.number % 5 == 0:  # Log every 5 trials for LSTM
+                log_memory_usage(f"LSTM Trial {trial.number}")
+        
         study.optimize(
             objective,
             n_trials=self.config.n_trials,
-            show_progress_bar=True
+            show_progress_bar=True,
+            callbacks=[memory_callback]
         )
         
         # Store best parameters

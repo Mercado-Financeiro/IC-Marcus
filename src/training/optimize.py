@@ -1,0 +1,733 @@
+#!/usr/bin/env python3
+"""
+Script principal para executar otimização completa do pipeline ML.
+
+Uso:
+    python run_optimization.py --config configs/xgb.yaml --symbol BTCUSDT
+    python run_optimization.py --config configs/lstm.yaml --symbol ETHUSDT
+    python run_optimization.py --model both --symbol BTCUSDT
+    python run_optimization.py --quick  # Teste rápido com configs fast_mode
+"""
+
+import os
+import sys
+import warnings
+import argparse
+import time
+import pickle
+import yaml
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, Any
+
+# Configurar ambiente
+sys.path.append(str(Path(__file__).parent))
+warnings.filterwarnings('ignore')
+
+# Determinismo
+os.environ['PYTHONHASHSEED'] = '0'
+os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics import f1_score, precision_recall_curve, auc, roc_auc_score, brier_score_loss
+import mlflow
+
+# Importar módulos do projeto
+from src.data.binance_loader import BinanceDataLoader
+from src.data.splits import PurgedKFold
+from src.features.engineering import FeatureEngineer
+from src.features.selection_funnel import run_funnel
+from src.models.xgb_optuna import XGBoostOptuna
+from src.models.lstm_optuna import LSTMOptuna, LSTMOptunaConfig
+from src.backtest.engine import BacktestEngine
+try:
+    import ta  # For optional volatility-weighted sampling
+except Exception:  # pragma: no cover
+    ta = None
+
+# Seed global
+SEED = 42
+np.random.seed(SEED)
+
+
+def load_config(config_path: str) -> Dict[str, Any]:
+    """Carrega configuração YAML."""
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
+
+def load_all_configs() -> Dict[str, Any]:
+    """Carrega todas as configurações."""
+    configs = {}
+    config_files = ['data.yaml', 'xgb.yaml', 'lstm.yaml', 'backtest.yaml', 'optuna.yaml']
+
+    for config_file in config_files:
+        config_path = f"configs/{config_file}"
+        if Path(config_path).exists():
+            configs[config_file.replace('.yaml', '')] = load_config(config_path)
+        else:
+            print(f"⚠️ Config não encontrado: {config_path}")
+
+    return configs
+
+
+class OptimizationPipeline:
+    """Pipeline completo de otimização para modelos ML usando configurações YAML."""
+
+    def __init__(self, configs: Dict[str, Any], quick_mode=False):
+        """
+        Args:
+            configs: Dicionário com todas as configurações YAML
+            quick_mode: Se True, usa configurações fast_mode dos YAMLs
+        """
+        self.configs = configs
+        self.quick_mode = quick_mode
+        self.loader = BinanceDataLoader()
+
+        # MLflow
+        data_config = configs.get('data', {})
+        mlflow.set_tracking_uri("artifacts/mlruns")
+        mlflow.set_experiment("crypto_ml_production")
+
+        # Parâmetros padrão derivados das configs
+        # Embargo: preferir de xgb.cv, senão de data.split.purged_kfold
+        def _nested(d: Dict[str, Any], path: list[str], default=None):
+            cur = d
+            for k in path:
+                if not isinstance(cur, dict):
+                    return default
+                cur = cur.get(k)
+                if cur is None:
+                    return default
+            return cur
+
+        self.embargo = (
+            _nested(configs, ['xgb', 'cv', 'embargo'], None)
+            or _nested(configs, ['data', 'split', 'purged_kfold', 'embargo'], None)
+            or 10
+        )
+        # Trials LSTM a partir de lstm.optuna
+        self.lstm_trials = configs.get('lstm', {}).get('optuna', {}).get('n_trials', 50)
+
+        # Aplicar fast_mode se necessário
+        if quick_mode:
+            self._apply_fast_mode()
+
+    def _apply_fast_mode(self):
+        """Aplica configurações fast_mode de todos os configs."""
+        if 'xgb' in self.configs and 'fast_mode' in self.configs['xgb']:
+            fast_config = self.configs['xgb']['fast_mode']
+            if fast_config.get('enabled', False):
+                self.configs['xgb']['optuna']['n_trials'] = fast_config.get('n_trials', 5)
+                self.configs['xgb']['xgb']['n_estimators'] = fast_config.get('n_estimators', 50)
+
+        if 'lstm' in self.configs and 'fast_mode' in self.configs['lstm']:
+            fast_config = self.configs['lstm']['fast_mode']
+            if fast_config.get('enabled', False):
+                self.configs['lstm']['optuna']['n_trials'] = fast_config.get('n_trials', 3)
+                self.configs['lstm']['training']['epochs'] = fast_config.get('epochs', 10)
+
+    def prepare_data(self, symbol="BTCUSDT", timeframe="15m"):
+        """Prepara dados com feature engineering completo usando configurações YAML."""
+
+        data_config = self.configs.get('data', {})
+
+        # Datas
+        start_date = data_config.get('data', {}).get('start_date', '2020-01-01')
+        end_date = data_config.get('data', {}).get('end_date', '2024-12-31')
+
+        print(f"\n📊 Carregando dados {symbol} {timeframe}...")
+        df = self.loader.fetch_ohlcv(symbol, timeframe, start_date, end_date)
+        df = self.loader.validate_data(df)
+        print(f"✅ {len(df)} barras carregadas")
+
+        # Feature Engineering
+        print("\n🔧 Criando features...")
+        features_config = data_config.get('features', {})
+
+        if self.quick_mode:
+            # Features simplificadas para teste rápido
+            df['returns'] = df['close'].pct_change()
+            df['sma_20'] = df['close'].rolling(20).mean()
+            df['rsi'] = self._calculate_rsi(df['close'])
+            feature_cols = ['returns', 'sma_20', 'rsi']
+        else:
+            # Features completas usando orquestrador unificado
+            if isinstance(features_config, dict):
+                lookback_periods = features_config.get('lookback_periods', [5, 10, 20, 50, 100])
+                technical_inds = features_config.get('technical_indicators', None)
+            else:
+                # Se vier lista, assuma que são nomes de indicadores técnicos
+                lookback_periods = [5, 10, 20, 50, 100]
+                technical_inds = features_config if isinstance(features_config, list) else None
+            feature_eng = FeatureEngineer(lookback_periods=lookback_periods, technical_indicators=technical_inds)
+            df = feature_eng.create_all_features(df)
+            feature_cols = [c for c in df.columns if c not in ['open','high','low','close','volume','label']]
+
+        # Labeling direcional MELHORADO para criptomoedas (baseado no diagnóstico)
+        # Implementando threshold mais restritivo para filtrar ruído
+        labels_config = data_config.get('labels', {})
+        horizon_minutes = labels_config.get('horizon_minutes', 15)
+        min_return_threshold = labels_config.get('min_return_threshold', 0.005)  # 0.5% mínimo (mais restritivo)
+
+        # Configurações de trading (para threshold baseado em lucro)
+        trading_config = data_config.get('trading', {})
+        cost_per_trade = trading_config.get('costs', {}).get('cost_per_trade', 0.002)
+        win_return = trading_config.get('returns', {}).get('win_return', 0.010)  # 1% mais conservador
+
+        # Calcular retorno futuro baseado no horizonte
+        if horizon_minutes == 15:  # 1 barra de 15min
+            future_returns = df['returns'].shift(-1)
+        elif horizon_minutes == 30:  # 2 barras
+            future_returns = (df['close'].shift(-2) / df['close'] - 1)
+        elif horizon_minutes == 60:  # 4 barras
+            future_returns = (df['close'].shift(-4) / df['close'] - 1)
+        elif horizon_minutes == 240:  # 16 barras (4h)
+            future_returns = (df['close'].shift(-16) / df['close'] - 1)
+        else:
+            # Calcular dinamicamente baseado no timeframe
+            bars_ahead = int(horizon_minutes / 15)  # Assumindo timeframe de 15min
+            future_returns = (df['close'].shift(-bars_ahead) / df['close'] - 1)
+
+        # Criar labels mais restritivos (baseado no diagnóstico)
+        df['label'] = 0  # Default: não operar
+
+        # Só sinalizar movimentos significativos
+        df.loc[future_returns > min_return_threshold, 'label'] = 1   # Compra forte
+        df.loc[future_returns < -min_return_threshold, 'label'] = -1 # Venda forte (para análise)
+
+        # Para XGBoost binário, converter para {0, 1}
+        # 0 = não operar ou venda, 1 = compra forte
+        df['label'] = (df['label'] == 1).astype(int)
+
+        # Sample weights baseados na volatilidade (opcional)
+        if labels_config.get('use_volatility_weights', False) and ta is not None:
+            # Usar ATR para ponderar amostras mais voláteis
+            if 'atr_14' not in df.columns:
+                df['atr_14'] = ta.volatility.AverageTrueRange(
+                    df['high'], df['low'], df['close'], window=14
+                ).average_true_range()
+
+            # Normalizar ATR para sample weights
+            atr_normalized = df['atr_14'] / df['atr_14'].mean()
+            sample_weights = np.clip(atr_normalized, 0.5, 2.0)  # Limitar entre 0.5 e 2.0
+        else:
+            sample_weights = None
+
+        # Análise da distribuição de labels
+        label_distribution = df['label'].value_counts().to_dict()
+        total_samples = len(df)
+        up_count = label_distribution.get(1, 0)
+        down_count = label_distribution.get(0, 0)
+
+        print(f"\n📊 Labeling Direcional (Subir/Descer):")
+        print(f"  • Horizonte: {horizon_minutes} minutos")
+        print(f"  • Threshold mínimo: {min_return_threshold:.4f}")
+        print(f"  • Subir (1): {up_count} ({up_count/total_samples*100:.1f}%)")
+        print(f"  • Descer (0): {down_count} ({down_count/total_samples*100:.1f}%)")
+        print(f"  • Total: {total_samples} amostras")
+
+        # Limpar NaNs após criação de labels e filtragem
+        df = df.dropna()
+        print(f"✅ Features: {len(feature_cols)} | Binary Labels: {df['label'].value_counts().to_dict()}")
+
+        # Preparar X, y (somente colunas numéricas para evitar dtype=object)
+        X = df[feature_cols]
+        # Selecionar apenas tipos numéricos e converter para float32
+        X = X.select_dtypes(include=[np.number]).astype(np.float32)
+        # Sanitizar valores não finitos (após dropna acima, ainda pode restar inf)
+        X.replace([np.inf, -np.inf], np.nan, inplace=True)
+        X = X.dropna()
+
+        # Reajustar y e índices se houve drop por NaN em X
+        y = df.loc[X.index, 'label']
+        y = df['label']
+
+        # Alinhar sample_weights com X e y
+        if sample_weights is not None:
+            # Converter para Series com mesmo índice e alinhar após dropna/filtragem
+            if not isinstance(sample_weights, pd.Series):
+                sample_weights = pd.Series(sample_weights, index=df.index)
+            sample_weights = sample_weights.loc[df.index]
+
+        # Split temporal usando configuração
+        split_config = data_config.get('split', {})
+        test_size_pct = split_config.get('test_size', 0.2)
+        test_size = int(len(X) * test_size_pct)
+
+        X_train = X.iloc[:-test_size]
+        X_test = X.iloc[-test_size:]
+        y_train = y.iloc[:-test_size]
+        y_test = y.iloc[-test_size:]
+
+        if sample_weights is not None:
+            # Handle both Series and numpy array
+            if isinstance(sample_weights, pd.Series):
+                weights_train = sample_weights.iloc[:-test_size]
+            else:
+                # Convert numpy array to Series with same index as X
+                sample_weights = pd.Series(sample_weights, index=X.index)
+                weights_train = sample_weights.iloc[:-test_size]
+        else:
+            weights_train = None
+
+        print(f"\n✅ Train: {len(X_train)} | Test: {len(X_test)} | Features(before): {X_train.shape[1]}")
+
+        # Feature selection funnel (prune -> mRMR -> SFFS)
+        try:
+            xtrain_df = X_train.copy()
+            ytrain = y_train.copy()
+            # Read CV/embargo from configs
+            xgb_cfg = self.configs.get('xgb', {})
+            cv_cfg = xgb_cfg.get('cv', {})
+            if isinstance(cv_cfg, dict):
+                folds = int(cv_cfg.get('n_splits', 5))
+                emb = int(cv_cfg.get('embargo', 10))
+            else:
+                folds = int(xgb_cfg.get('cv_params', {}).get('n_splits', 5))
+                emb = int(xgb_cfg.get('cv_params', {}).get('embargo', 10))
+            # Target sizes
+            final_k = int(xgb_cfg.get('feature_funnel', {}).get('final_k', 40)) if isinstance(xgb_cfg.get('feature_funnel', {}), dict) else 40
+            mrmr_k = max(final_k + 10, 50)
+            selected = run_funnel(
+                xtrain_df, ytrain,
+                n_splits=folds, embargo=emb,
+                corr_threshold=0.92, mrmr_k=mrmr_k, final_k=final_k,
+                lambda_penalty=0.02, seed=SEED
+            )
+            if len(selected) >= max(15, int(0.05 * X_train.shape[1])):
+                print(f"🌿 Funnel selected {len(selected)} features")
+                X_train = X_train[selected]
+                X_test = X_test[selected]
+                feature_cols = selected
+            else:
+                print("⚠️ Funnel selection too small; skipping reduction")
+        except Exception as e:
+            print(f"⚠️ Funnel selection failed: {e}; proceeding with full set")
+
+        print(f"✅ Features(after): {X_train.shape[1]}")
+
+        # Verificar não-vazamento
+        assert X_train.index.max() < X_test.index.min(), "❌ Vazamento temporal!"
+        print("🔒 Sem vazamento temporal verificado")
+
+        return {
+            'X_train': X_train,
+            'X_test': X_test,
+            'y_train': y_train,
+            'y_test': y_test,
+            'weights_train': weights_train,
+            'df': df,
+            'feature_cols': feature_cols
+        }
+
+    def optimize_xgboost(self, data):
+        """Otimização Bayesiana para XGBoost usando configurações YAML."""
+
+        print(f"\n{'='*60}")
+        print(f"🎯 XGBOOST - {self.configs.get('xgb', {}).get('optuna', {}).get('n_trials', 100)} trials")
+        print(f"{'='*60}")
+
+        start_time = time.time()
+
+        # Configurações de trading (para threshold baseado em lucro)
+        trading_config = self.configs.get('data', {}).get('trading', {})
+        cost_per_trade = trading_config.get('costs', {}).get('cost_per_trade', 0.002)
+        win_return = trading_config.get('returns', {}).get('win_return', 0.015)
+
+        # Configurações XGBoost
+        xgb_config = self.configs.get('xgb', {})
+        # Optuna config might be global or under xgb
+        optuna_config = xgb_config.get('optuna', {}) or \
+                        self.configs.get('optuna', {}).get('xgb', {}) or \
+                        self.configs.get('optuna', {})
+        n_trials = optuna_config.get('n_trials', 100)
+        pruner_type = optuna_config.get('pruner_type', 'hyperband')
+
+        # Configurações CV
+        cv_config = xgb_config.get('cv', {})
+        if isinstance(cv_config, dict):
+            cv_folds = cv_config.get('n_splits', 5)
+            embargo = cv_config.get('embargo', 10)
+        elif isinstance(cv_config, str):
+            # Support schema: cv: 'purged_kfold' + cv_params: {n_splits, embargo}
+            params = xgb_config.get('cv_params', {}) if isinstance(xgb_config, dict) else {}
+            cv_folds = params.get('n_splits', 5)
+            embargo = params.get('embargo', 10)
+        else:
+            cv_folds, embargo = 5, 10
+
+        # Criar otimizador
+        xgb_opt = XGBoostOptuna(
+            n_trials=n_trials,
+            cv_folds=cv_folds,
+            embargo=embargo,
+            pruner_type=pruner_type,
+            use_mlflow=not self.quick_mode,
+            seed=SEED
+        )
+
+        # Otimizar
+        study, model = xgb_opt.optimize(
+            data['X_train'],
+            data['y_train'],
+            sample_weights=data['weights_train']
+        )
+
+        elapsed = (time.time() - start_time) / 60
+        print(f"\n✅ Otimização completa em {elapsed:.1f} minutos")
+        print(f"📊 Melhor score: {study.best_value:.4f}")
+
+        # Avaliar
+        y_pred_proba = xgb_opt.predict_proba(data['X_test'])
+        y_pred = xgb_opt.predict(data['X_test'])
+
+        # Métricas ML tradicionais
+        metrics = self._calculate_metrics(data['y_test'], y_pred, y_pred_proba)
+        metrics['threshold_f1'] = xgb_opt.threshold_f1
+        metrics['threshold_ev'] = xgb_opt.threshold_ev
+        metrics['threshold_profit'] = xgb_opt.threshold_profit
+
+        # Métricas de trading baseadas em lucro (mais realistas)
+        trading_metrics = xgb_opt.calculate_trading_metrics(
+            data['X_test'],
+            data['y_test'],
+            cost_per_trade=cost_per_trade,
+            win_return=win_return
+        )
+
+        # Backtest com thresholds otimizados
+        backtest_metrics = self._run_backtest(data['df'], data['X_test'], y_pred, y_pred_proba)
+
+        # Mostrar métricas de trading
+        print(f"\n💰 Métricas de Trading (Baseadas em Lucro):")
+        print(f"  • Threshold Ótimo: {trading_metrics['threshold_profit']:.4f}")
+        print(f"  • Total de Trades: {trading_metrics['total_trades']}")
+        print(f"  • Win Rate: {trading_metrics['win_rate']:.2%}")
+        print(f"  • Lucro Bruto: {trading_metrics['gross_profit']:.4f}")
+        print(f"  • Custo Total: {trading_metrics['total_cost']:.4f}")
+        print(f"  • Lucro Líquido: {trading_metrics['net_profit']:.4f}")
+        print(f"  • ROI: {trading_metrics['roi']:.2%}")
+        print(f"  • Profit Factor: {trading_metrics['profit_factor']:.2f}")
+        print(f"  • EV por Trade: {trading_metrics['ev_per_trade']:.4f}")
+
+        # Salvar modelo
+        if not self.quick_mode:
+            model_path = "artifacts/models/xgboost_optimized.pkl"
+            os.makedirs(os.path.dirname(model_path), exist_ok=True)
+            with open(model_path, 'wb') as f:
+                pickle.dump({
+                    'model': xgb_opt.best_model,
+                    'calibrator': xgb_opt.calibrator,
+                    'params': xgb_opt.best_params,
+                    'thresholds': {
+                        'f1': xgb_opt.threshold_f1,
+                        'ev': xgb_opt.threshold_ev
+                    }
+                }, f)
+            print(f"💾 Modelo salvo: {model_path}")
+
+        return {
+            'ml_metrics': metrics,
+            'trading_metrics': backtest_metrics,
+            'best_params': xgb_opt.best_params
+        }
+
+    def optimize_lstm(self, data):
+        """Otimização Bayesiana para LSTM."""
+
+        print(f"\n{'='*60}")
+        print(f"🧠 LSTM - {self.lstm_trials} trials")
+        print(f"{'='*60}")
+
+        start_time = time.time()
+
+        # Preparar dados para LSTM (sanitização + normalização)
+        from sklearn.preprocessing import StandardScaler
+        scaler = StandardScaler()
+
+        # Garantir apenas numéricos e sem inf/NaN
+        def _sanitize(df):
+            Xn = df.select_dtypes(include=[np.number]).copy()
+            Xn.replace([np.inf, -np.inf], np.nan, inplace=True)
+            Xn.dropna(inplace=True)
+            return Xn.astype(np.float32)
+
+        X_train_clean = _sanitize(data['X_train'])
+        X_test_clean = _sanitize(data['X_test'])
+
+        # Realinhar rótulos aos índices pós-sanitização
+        y_train_clean = data['y_train'].loc[X_train_clean.index]
+        y_test_clean = data['y_test'].loc[X_test_clean.index]
+
+        # Normalizar
+        X_train_scaled = pd.DataFrame(
+            scaler.fit_transform(X_train_clean),
+            index=X_train_clean.index,
+            columns=X_train_clean.columns
+        )
+        X_test_scaled = pd.DataFrame(
+            scaler.transform(X_test_clean),
+            index=X_test_clean.index,
+            columns=X_test_clean.columns
+        )
+
+        # Criar otimizador
+        lstm_config = LSTMOptunaConfig(
+            n_trials=self.lstm_trials,
+            cv_folds=3,
+            embargo=self.embargo,
+            pruner_type=('median' if self.quick_mode else 'hyperband'),
+            early_stopping_patience=10,
+            max_epochs=(20 if self.quick_mode else 100),
+            batch_size=64,
+            seed=SEED,
+            device='auto'
+        )
+        lstm_opt = LSTMOptuna(config=lstm_config)
+
+        # Otimizar
+        study = lstm_opt.optimize(X_train_scaled, y_train_clean)
+
+        elapsed = (time.time() - start_time) / 60
+        print(f"\n✅ Otimização completa em {elapsed:.1f} minutos")
+        print(f"📊 Melhor score: {study.best_value:.4f}")
+
+        # Treinar modelo final
+        lstm_opt.fit_final_model(X_train_scaled, y_train_clean)
+
+        # Avaliar
+        y_pred_proba = lstm_opt.predict_proba(X_test_scaled)
+        y_pred = lstm_opt.predict(X_test_scaled)
+
+        metrics = self._calculate_metrics(y_test_clean, y_pred, y_pred_proba)
+        metrics['threshold_f1'] = lstm_opt.threshold_f1
+        metrics['threshold_ev'] = lstm_opt.threshold_ev
+
+        # Backtest com thresholds otimizados
+        backtest_metrics = self._run_backtest(data['df'], X_test_clean, y_pred, y_pred_proba)
+
+        # Salvar modelo
+        if not self.quick_mode:
+            model_path = "artifacts/models/lstm_optimized.pkl"
+            with open(model_path, 'wb') as f:
+                pickle.dump({
+                    'model': lstm_opt.best_model,
+                    'calibrator': lstm_opt.calibrator,
+                    'params': lstm_opt.best_params,
+                    'scaler': scaler,
+                    'thresholds': {
+                        'f1': lstm_opt.threshold_f1,
+                        'ev': lstm_opt.threshold_ev
+                    }
+                }, f)
+            print(f"💾 Modelo salvo: {model_path}")
+
+        return {
+            'ml_metrics': metrics,
+            'trading_metrics': backtest_metrics,
+            'best_params': lstm_opt.best_params
+        }
+
+    def _calculate_metrics(self, y_true, y_pred, y_proba):
+        """Calcula métricas de ML."""
+        precision, recall, _ = precision_recall_curve(y_true, y_proba)
+
+        metrics = {
+            'f1_score': f1_score(y_true, y_pred),
+            'pr_auc': auc(recall, precision),
+            'roc_auc': roc_auc_score(y_true, y_proba),
+            'brier_score': brier_score_loss(y_true, y_proba)
+        }
+
+        print("\n📈 Métricas ML:")
+        for k, v in metrics.items():
+            print(f"  {k}: {v:.4f}")
+
+        return metrics
+
+    def _run_backtest(self, df, X_test, y_pred, y_pred_proba=None):
+        """Executa backtest com execução t+1 e thresholds otimizados."""
+
+        print("\n💰 Executando backtest...")
+        bt_df = df.loc[X_test.index]
+
+        bt = BacktestEngine(
+            initial_capital=100000,
+            fee_bps=5,
+            slippage_bps=5
+        )
+
+        # Se temos probabilidades, otimizar thresholds
+        if y_pred_proba is not None:
+            print("🎯 Otimizando thresholds para maximizar EV...")
+
+            # Otimizar thresholds
+            optimization_result = bt.optimize_thresholds_for_ev(
+                bt_df,
+                y_pred_proba[:, 1] if len(y_pred_proba.shape) > 1 else y_pred_proba,
+                threshold_range=(0.25, 0.75),
+                step=0.05,
+                min_gap=0.2
+            )
+
+            optimal_thresholds = optimization_result['thresholds']
+            print(f"  • Long Threshold: {optimal_thresholds['long']:.3f}")
+            print(f"  • Short Threshold: {optimal_thresholds['short']:.3f}")
+
+            # Gerar sinais com thresholds otimizados
+            probas = y_pred_proba[:, 1] if len(y_pred_proba.shape) > 1 else y_pred_proba
+            signals = bt.generate_signals_with_thresholds(
+                probas,
+                optimal_thresholds['long'],
+                optimal_thresholds['short'],
+                mode='double'
+            )
+            signals = pd.Series(signals, index=X_test.index)
+
+            # Usar métricas da otimização
+            metrics = optimization_result['metrics']
+            print(f"  • Abstention Rate: {metrics.get('abstention_rate', 0):.1%}")
+        else:
+            # Usar sinais binários simples
+            signals = pd.Series(y_pred * 2 - 1, index=X_test.index)  # Converter 0/1 para -1/1
+            results = bt.run_backtest(bt_df, signals)
+            metrics = bt.calculate_metrics(results)
+
+        print("📊 Métricas Trading:")
+        for k in ['total_return', 'sharpe_ratio', 'max_drawdown', 'win_rate', 'expected_value']:
+            if k in metrics:
+                print(f"  {k}: {metrics[k]:.4f}")
+
+        return metrics
+
+    def _calculate_rsi(self, prices, period=14):
+        """Calcula RSI simples."""
+        delta = prices.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+
+
+def main():
+    """Função principal."""
+
+    parser = argparse.ArgumentParser(description='Otimização de modelos ML para trading com configurações YAML')
+    parser.add_argument('--config', type=str, default=None,
+                       help='Caminho para arquivo de configuração específico (ex: configs/xgb.yaml)')
+    parser.add_argument('--model', choices=['xgboost', 'lstm', 'both'],
+                       default='xgboost', help='Modelo para otimizar')
+    parser.add_argument('--quick', action='store_true',
+                       help='Modo rápido usando fast_mode das configurações')
+    parser.add_argument('--symbol', default='BTCUSDT',
+                       help='Símbolo para treinar')
+    parser.add_argument('--timeframe', default='15m',
+                       help='Timeframe dos dados')
+
+    args = parser.parse_args()
+
+    print("\n" + "="*60)
+    print("🚀 PIPELINE DE OTIMIZAÇÃO ML COM CONFIGS YAML")
+    print("="*60)
+    print(f"Modelo: {args.model}")
+    print(f"Modo: {'QUICK TEST' if args.quick else 'PRODUÇÃO'}")
+    print(f"Symbol: {args.symbol} | Timeframe: {args.timeframe}")
+    print(f"Config: {args.config or 'ALL CONFIGS'}")
+    print(f"Início: {datetime.now()}")
+    print("="*60)
+
+    # Carregar configurações
+    if args.config:
+        # Carregar configuração específica
+        if not Path(args.config).exists():
+            print(f"❌ Arquivo de configuração não encontrado: {args.config}")
+            return 1
+
+        config_data = load_config(args.config)
+        # Ainda precisamos das outras configs base
+        all_configs = load_all_configs()
+
+        # Override com config específico
+        config_name = Path(args.config).stem
+        all_configs[config_name] = config_data
+        configs = all_configs
+    else:
+        # Carregar todas as configurações
+        configs = load_all_configs()
+
+    # Verificar se configs foram carregadas
+    if not configs:
+        print("❌ Nenhuma configuração encontrada! Certifique-se que configs/ existe")
+        return 1
+
+    print(f"✅ Configurações carregadas: {list(configs.keys())}")
+
+    # Criar pipeline
+    pipeline = OptimizationPipeline(configs, quick_mode=args.quick)
+
+    # Preparar dados
+    data = pipeline.prepare_data(args.symbol, args.timeframe)
+
+    results = {}
+
+    # Otimizar modelos
+    try:
+        if args.model in ['xgboost', 'both']:
+            if 'xgb' not in configs:
+                print("⚠️ Configuração XGBoost não encontrada, pulando...")
+            else:
+                results['xgboost'] = pipeline.optimize_xgboost(data)
+
+        if args.model in ['lstm', 'both']:
+            if 'lstm' not in configs:
+                print("⚠️ Configuração LSTM não encontrada, pulando...")
+            else:
+                results['lstm'] = pipeline.optimize_lstm(data)
+
+        # Resumo final
+        print("\n" + "="*60)
+        print("✅ OTIMIZAÇÃO COMPLETA!")
+        print("="*60)
+
+        for model_name, model_results in results.items():
+            print(f"\n📊 {model_name.upper()}:")
+            print(f"  F1 Score: {model_results['ml_metrics']['f1_score']:.4f}")
+            print(f"  Sharpe Ratio: {model_results['trading_metrics'].get('sharpe_ratio', 0):.4f}")
+            print(f"  Total Return: {model_results['trading_metrics'].get('total_return', 0):.2%}")
+
+        # Verificar se atende aos targets das configurações
+        for model_name, model_results in results.items():
+            config_key = 'xgb' if model_name == 'xgboost' else 'lstm'
+            targets = configs.get(config_key, {}).get('targets', {})
+
+            ml_ok = (model_results['ml_metrics']['f1_score'] > targets.get('f1_score', 0.6) and
+                    model_results['ml_metrics']['brier_score'] < targets.get('brier_score_max', 0.25))
+            trade_ok = model_results['trading_metrics'].get('sharpe_ratio', 0) > 1.0
+
+            if ml_ok and trade_ok:
+                print(f"\n🏆 {model_name.upper()} está PRONTO PARA PRODUÇÃO!")
+            else:
+                print(f"\n⚠️ {model_name.upper()} precisa de mais otimização")
+                print(f"   ML targets: F1>{targets.get('f1_score', 0.6)}, Brier<{targets.get('brier_score_max', 0.25)}")
+                print(f"   Trading target: Sharpe>1.0")
+
+        print(f"\nFim: {datetime.now()}")
+        print("\n💡 Para ver resultados detalhados: mlflow ui")
+
+    except KeyboardInterrupt:
+        print("\n\n⚠️ Otimização interrompida pelo usuário")
+    except Exception as e:
+        print(f"\n❌ Erro: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

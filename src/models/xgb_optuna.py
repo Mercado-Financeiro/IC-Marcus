@@ -1,14 +1,17 @@
 """XGBoost with Bayesian optimization using Optuna."""
 
+import gc
 import numpy as np
 import pandas as pd
 from typing import Dict, Tuple, Optional, Any
 import xgboost as xgb
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import (
     f1_score, precision_recall_curve, auc, roc_auc_score,
     brier_score_loss, matthews_corrcoef, confusion_matrix
 )
+from scipy.stats.mstats import winsorize
 import optuna
 from optuna.pruners import MedianPruner, HyperbandPruner, SuccessiveHalvingPruner
 from optuna.samplers import TPESampler
@@ -40,6 +43,7 @@ sys.path.append(str(base_path))
 
 from data.splits import PurgedKFold
 from utils.determinism import set_deterministic_environment
+from utils.memory_utils import memory_cleanup, cleanup_after_trial, safe_delete, log_memory_usage
 
 warnings.filterwarnings('ignore')
 
@@ -51,10 +55,15 @@ class XGBoostOptuna:
         self,
         n_trials: int = 100,
         cv_folds: int = 5,
-        embargo: int = 10,
+        embargo: int = 30,  # Increased embargo to avoid temporal leakage
         pruner_type: str = 'hyperband',
         use_mlflow: bool = True,
-        seed: int = 42
+        seed: int = 42,
+        study_name: Optional[str] = None,
+        storage: Optional[str] = None,
+        reset_study: bool = False,
+        selection_method: str = 'none',
+        selection_params: Optional[Dict] = None,
     ):
         """Initialize XGBoost optimizer.
 
@@ -72,6 +81,15 @@ class XGBoostOptuna:
         self.pruner_type = pruner_type
         self.use_mlflow = use_mlflow
         self.seed = seed
+        # Generate study name with timestamp if not provided
+        from datetime import datetime
+        self.study_name = study_name or f'xgb_{datetime.now():%Y%m%d_%H%M%S}'
+        self.reset_study = reset_study
+        # Default persistent storage (Optuna RDB) if not provided
+        self.storage = storage or str((Path('artifacts') / 'optuna' / 'xgb_study.db').resolve())
+        # Feature selection config (applied per-fold to avoid leakage)
+        self.selection_method = selection_method
+        self.selection_params = selection_params or {}
 
         self.best_model = None
         self.best_params = None
@@ -91,7 +109,9 @@ class XGBoostOptuna:
             n_trials=n_trials,
             cv_folds=cv_folds,
             embargo=embargo,
-            pruner=pruner_type
+            pruner=pruner_type,
+            storage=self.storage,
+            study_name=self.study_name
         )
 
     def _setup_logging(self):
@@ -120,6 +140,66 @@ class XGBoostOptuna:
 
             return LogShim()
 
+    def _preprocess_features(
+        self, 
+        X_train: pd.DataFrame, 
+        X_val: Optional[pd.DataFrame] = None,
+        winsorize_limits: Tuple[float, float] = (0.01, 0.01)
+    ) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
+        """Preprocess features with RobustScaler and winsorization.
+        
+        Args:
+            X_train: Training features
+            X_val: Validation features (optional)
+            winsorize_limits: Lower and upper percentile limits for winsorization
+            
+        Returns:
+            Preprocessed training and validation features
+        """
+        with memory_cleanup():
+            # Copy to avoid modifying original data
+            X_train_proc = X_train.copy()
+            
+            # Winsorize outliers in training data (1st and 99th percentile by default)
+            for col in X_train_proc.columns:
+                if X_train_proc[col].dtype in ['float64', 'float32', 'int64', 'int32']:
+                    X_train_proc[col] = winsorize(X_train_proc[col], limits=winsorize_limits)
+            
+            # Fit RobustScaler on winsorized training data
+            self.scaler = RobustScaler()
+            X_train_scaled = pd.DataFrame(
+                self.scaler.fit_transform(X_train_proc),
+                index=X_train.index,
+                columns=X_train.columns
+            )
+            
+            # Clean up temporary data
+            del X_train_proc
+            
+            # Apply same transformation to validation if provided
+            X_val_scaled = None
+            if X_val is not None:
+                X_val_proc = X_val.copy()
+                # Apply same winsorization limits from training
+                for col in X_val_proc.columns:
+                    if X_val_proc[col].dtype in ['float64', 'float32', 'int64', 'int32']:
+                        # Get limits from training data
+                        lower = np.percentile(X_train[col], winsorize_limits[0] * 100)
+                        upper = np.percentile(X_train[col], (1 - winsorize_limits[1]) * 100)
+                        X_val_proc[col] = np.clip(X_val_proc[col], lower, upper)
+                
+                # Apply scaler fitted on training data
+                X_val_scaled = pd.DataFrame(
+                    self.scaler.transform(X_val_proc),
+                    index=X_val.index,
+                    columns=X_val.columns
+                )
+                
+                # Clean up temporary data
+                del X_val_proc
+                
+        return X_train_scaled, X_val_scaled
+    
     def _calculate_scale_pos_weight(self, y: pd.Series) -> float:
         """Calculate scale_pos_weight for class imbalance."""
         n_neg = (y == 0).sum()
@@ -268,36 +348,69 @@ class XGBoostOptuna:
 
         return optimal_threshold
 
-    def _optimize_threshold_ev(self, y: pd.Series, y_pred_proba: np.ndarray, costs: Dict) -> float:
-        """Optimize threshold for expected value (legacy method - kept for compatibility)."""
-        # This is the old EV method - keeping for backward compatibility
+    def _optimize_threshold_ev_with_turnover(
+        self, 
+        y: pd.Series, 
+        y_pred_proba: np.ndarray, 
+        costs: Dict,
+        turnover_penalty: float = 0.001
+    ) -> float:
+        """Optimize threshold for expected value with turnover penalty.
+        
+        Args:
+            y: True labels
+            y_pred_proba: Predicted probabilities
+            costs: Dictionary with fee_bps and slippage_bps
+            turnover_penalty: Cost per position flip (default 0.1%)
+            
+        Returns:
+            Optimal threshold maximizing net EV
+        """
         thresholds = np.linspace(0.1, 0.9, 100)
         ev_scores = []
-
+        
         fee_bps = costs.get('fee_bps', 5)
         slippage_bps = costs.get('slippage_bps', 5)
-
+        total_cost_bps = fee_bps + slippage_bps
+        
         for thresh in thresholds:
-            y_pred = (y_pred_proba >= thresh).astype(int)
-
-            # Calculate confusion matrix
-            tn, fp, fn, tp = confusion_matrix(y, y_pred).ravel()
-
-            # Expected value calculation
-            total_trades = tp + fp
-            if total_trades == 0:
-                ev_scores.append(0)
+            signals = (y_pred_proba >= thresh).astype(int)
+            
+            # Calculate turnover (position changes)
+            if len(signals) > 1:
+                turnover = np.sum(np.abs(np.diff(signals))) / len(signals)
+            else:
+                turnover = 0
+                
+            # Calculate accuracy metrics
+            correct = (signals == y).mean()
+            action_rate = signals.mean()
+            
+            # Skip if no trades
+            if action_rate == 0:
+                ev_scores.append(-turnover_penalty)  # Only penalty
                 continue
-
-            win_rate = tp / total_trades if total_trades > 0 else 0
-            loss_rate = fp / total_trades if total_trades > 0 else 0
-
-            # Assume 1% gain on wins, 1% loss on losses (simplified)
-            ev = (win_rate * 0.01) - (loss_rate * 0.01) - ((fee_bps + slippage_bps) / 10000)
-            ev_scores.append(ev)
-
+                
+            # Expected return (assuming 1.5% avg move on correct predictions)
+            gross_return = correct * action_rate * 0.015
+            
+            # Transaction costs
+            tx_cost = action_rate * (total_cost_bps / 10000)
+            
+            # Turnover cost
+            turnover_cost = turnover * turnover_penalty
+            
+            # Net EV
+            net_ev = gross_return - tx_cost - turnover_cost
+            ev_scores.append(net_ev)
+            
         optimal_idx = np.argmax(ev_scores)
         return thresholds[optimal_idx]
+    
+    def _optimize_threshold_ev(self, y: pd.Series, y_pred_proba: np.ndarray, costs: Dict) -> float:
+        """Optimize threshold for expected value (legacy method - kept for compatibility)."""
+        # Redirect to new method with turnover
+        return self._optimize_threshold_ev_with_turnover(y, y_pred_proba, costs)
 
     def _create_objective(
         self, X: pd.DataFrame, y: pd.Series, sample_weights: Optional[np.ndarray] = None
@@ -334,6 +447,28 @@ class XGBoostOptuna:
                 X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
                 y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
+                # Optional: per-fold feature selection (leak-safe)
+                if self.selection_method and self.selection_method != 'none':
+                    try:
+                        if self.selection_method == 'select_kbest':
+                            from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
+                            k = int(self.selection_params.get('k', min(100, X_train.shape[1])))
+                            sf = self.selection_params.get('score_func', 'f_classif')
+                            scorer = mutual_info_classif if sf == 'mutual_info' else f_classif
+                            skb = SelectKBest(score_func=scorer, k=min(k, X_train.shape[1]))
+                            X_train = pd.DataFrame(skb.fit_transform(X_train, y_train), index=X_train.index)
+                            X_val = pd.DataFrame(skb.transform(X_val), index=X_val.index)
+                        elif self.selection_method == 'pca':
+                            from sklearn.decomposition import PCA
+                            n_components = int(self.selection_params.get('n_components', min(64, X_train.shape[1])))
+                            pca = PCA(n_components=n_components, random_state=self.seed)
+                            X_train = pd.DataFrame(pca.fit_transform(X_train), index=X_train.index)
+                            X_val = pd.DataFrame(pca.transform(X_val), index=X_val.index)
+                        if fold_idx == 0:
+                            self.log.info("per_fold_feature_selection", method=self.selection_method)
+                    except Exception as e:
+                        self.log.warning("feature_selection_failed", error=str(e))
+
                 # Sample weights - ensure proper alignment
                 if sample_weights is not None:
                     if isinstance(sample_weights, pd.Series):
@@ -343,24 +478,18 @@ class XGBoostOptuna:
                 else:
                     w_train = None
 
-                # Create model WITHOUT early_stopping in constructor
-                model = xgb.XGBClassifier(**params)
+                # Create model with early stopping set via constructor for broad compatibility
+                params_with_es = params.copy()
+                params_with_es['early_stopping_rounds'] = 50
+                model = xgb.XGBClassifier(**params_with_es)
 
-                # Prepare callbacks
-                callbacks = [xgb.callback.EarlyStopping(rounds=50, save_best=True)]
-                
-                # Add Optuna pruning callback if available
-                if OPTUNA_XGB_INTEGRATION:
-                    callbacks.append(XGBoostPruningCallback(trial, "validation_0-aucpr"))
-
-                # Fit model with early_stopping and pruning in fit method (XGBoost 3.x API)
+                # Fit model with early stopping via fit kwargs (broadly compatible)
+                model.set_params(eval_metric='aucpr')
                 model.fit(
                     X_train, y_train,
                     sample_weight=w_train,
                     eval_set=[(X_val, y_val)],
-                    eval_metric='aucpr',  # Ensure metric matches pruning callback
-                    verbose=False,
-                    callbacks=callbacks
+                    verbose=False
                 )
 
                 # Get predictions
@@ -396,6 +525,10 @@ class XGBoostOptuna:
                 # PR-AUC
                 precision, recall, _ = precision_recall_curve(y_val, y_pred_proba)
                 pr_auc = auc(recall, precision)
+                
+                # Calculate prevalence and normalized AUPRC
+                prevalence = y_val.mean()
+                pr_auc_norm = (pr_auc - prevalence) / (1 - prevalence) if prevalence < 1 else 0
 
                 # Brier score (lower is better)
                 brier = brier_score_loss(y_val, y_pred_proba)
@@ -403,27 +536,37 @@ class XGBoostOptuna:
                 # Matthews correlation coefficient
                 mcc = matthews_corrcoef(y_val, y_pred)
 
-                # Use PR-AUC as primary metric (per requirements)
-                # Composite score: 60% PR-AUC, 25% F1, 15% MCC penalty from Brier
-                score = 0.6 * pr_auc + 0.25 * f1 + 0.15 * mcc - 0.1 * brier
+                # Use normalized PR-AUC as primary metric
+                # Composite score: 60% PR-AUC_norm, 25% F1, 15% MCC, penalty from Brier
+                score = 0.6 * pr_auc_norm + 0.25 * f1 + 0.15 * mcc - 0.1 * brier
                 scores.append(score)
 
                 # Log trial metrics for debugging
                 if fold_idx == 0:  # Log only first fold to avoid spam
                     self.log.info(
                         f"Trial {trial.number} Fold {fold_idx}: "
-                        f"f1={f1:.4f}, pr_auc={pr_auc:.4f}, "
-                        f"mcc={mcc:.4f}, brier={brier:.4f}, "
+                        f"f1={f1:.4f}, pr_auc={pr_auc:.4f}, pr_auc_norm={pr_auc_norm:.4f}, "
+                        f"prevalence={prevalence:.3f}, mcc={mcc:.4f}, brier={brier:.4f}, "
                         f"score={score:.4f}"
                     )
 
+                # Clean up model and data after fold
+                safe_delete(model, X_train, X_val, y_train, y_val)
+                if w_train is not None:
+                    del w_train
+                gc.collect()
+                
                 # Report for pruning
                 trial.report(score, fold_idx)
 
                 # Prune if needed
                 if trial.should_prune():
+                    # Additional cleanup before pruning
+                    gc.collect()
                     raise optuna.TrialPruned()
 
+            # Final cleanup after all folds
+            gc.collect()
             return np.mean(scores)
 
         return objective
@@ -448,11 +591,20 @@ class XGBoostOptuna:
         if len(X) == 0 or len(y) == 0:
             raise ValueError("Empty data provided")
 
-        # Check for NaN/Inf in features
-        if X.isna().any().any() or np.isinf(X.values).any():
-            n_nan = X.isna().sum().sum()
-            n_inf = np.isinf(X.values).sum()
-            raise ValueError(f"Input data contains NaN ({n_nan}) or Inf ({n_inf}) values. Clean data first.")
+        # Sanitize and validate features: keep only numeric columns
+        X_numeric = X.select_dtypes(include=[np.number])
+        if X_numeric.shape[1] != X.shape[1]:
+            try:
+                non_numeric = list(set(X.columns) - set(X_numeric.columns))
+                self.log.warning("non_numeric_features_dropped", count=len(non_numeric), features=non_numeric[:10])
+            except Exception:
+                pass
+
+        # Replace inf with NaN, then check
+        X_checked = X_numeric.replace([np.inf, -np.inf], np.nan)
+        if X_checked.isna().any().any():
+            n_nan = int(X_checked.isna().sum().sum())
+            raise ValueError(f"Input data contains NaN ({n_nan}) values. Clean data first.")
 
         # Check for NaN in labels
         if y.isna().any():
@@ -472,22 +624,51 @@ class XGBoostOptuna:
         )
 
         # Create study
+        # Ensure storage directory exists if using SQLite path
+        try:
+            storage_path = Path(self.storage)
+            if storage_path.suffix == '.db':
+                storage_path.parent.mkdir(parents=True, exist_ok=True)
+                storage_url = f"sqlite:///{storage_path}"
+            else:
+                storage_url = self.storage
+        except Exception:
+            storage_url = None
+
+        # Reset study if requested
+        if self.reset_study and storage_url:
+            try:
+                optuna.delete_study(study_name=self.study_name, storage=storage_url)
+                self.log.info(f"Deleted existing study: {self.study_name}")
+            except Exception:
+                pass  # Study might not exist
+        
         study = optuna.create_study(
             direction='maximize',
             sampler=TPESampler(seed=self.seed),
             pruner=self._get_pruner(),
-            study_name='xgboost_optimization'
+            study_name=self.study_name,
+            storage=storage_url,
+            load_if_exists=not self.reset_study  # Don't load if resetting
         )
 
         # Create objective
         objective = self._create_objective(X, y, sample_weights)
 
-        # Optimize
+        # Optimize with enhanced memory cleanup callback
+        def callback(study, trial):
+            # Force garbage collection after each trial
+            gc.collect()
+            # Log memory usage every 10 trials
+            if trial.number % 10 == 0:
+                log_memory_usage(f"Trial {trial.number}")
+        
         study.optimize(
             objective,
             n_trials=self.n_trials,
             show_progress_bar=True,
-            n_jobs=1  # Parallel inside XGBoost
+            n_jobs=1,  # Parallel inside XGBoost
+            callbacks=[callback]
         )
 
         # Save best parameters
@@ -502,8 +683,44 @@ class XGBoostOptuna:
             n_pruned=len(study.get_trials(states=[optuna.trial.TrialState.PRUNED]))
         )
 
-        # Fit final model with best parameters
-        self.best_model = self.fit_final_model(X, y, sample_weights)
+        # Persist trials to CSV for later analysis
+        try:
+            import pandas as pd
+            trials_data = []
+            for t in study.trials:
+                row = {
+                    'number': t.number,
+                    'value': t.value,
+                    'state': str(t.state),
+                }
+                row.update({f"param_{k}": v for k, v in t.params.items()})
+                trials_data.append(row)
+            trials_df = pd.DataFrame(trials_data)
+            out_dir = Path('artifacts') / 'optuna'
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_csv = out_dir / f"{self.study_name}_trials.csv"
+            trials_df.to_csv(out_csv, index=False)
+
+            if self.use_mlflow and MLFLOW_AVAILABLE and mlflow.active_run():
+                mlflow.log_artifact(str(out_csv))
+        except Exception as e:
+            self.log.warning("trials_export_failed", error=str(e))
+
+        # Fit final model with best parameters using temporal validation split
+        val_size = max(int(len(X_checked) * 0.2), 1)
+        X_train, X_val = X_checked.iloc[:-val_size], X_checked.iloc[-val_size:]
+        y_train, y_val = y.iloc[:-val_size], y.iloc[-val_size:]
+
+        sw_train = None
+        if sample_weights is not None:
+            import pandas as pd
+            if isinstance(sample_weights, (pd.Series, pd.DataFrame)):
+                sw_train = sample_weights.iloc[:-val_size]
+            else:
+                # assume numpy array-like
+                sw_train = np.asarray(sample_weights)[: len(X_train)]
+
+        self.best_model = self.fit_final_model(X_train, y_train, X_val, y_val, sw_train)
 
         # MLflow logging
         if self.use_mlflow and MLFLOW_AVAILABLE and mlflow.active_run():
@@ -555,12 +772,42 @@ class XGBoostOptuna:
         model = xgb.XGBClassifier(**params)
         model.fit(X_train, y_train, sample_weight=sample_weights, verbose=False)
 
-        # CRITICAL: Calibrate using validation data (prefit=True)
-        self.calibrator = CalibratedClassifierCV(
+        # CRITICAL: Compare calibration methods and choose best based on Brier Score
+        from sklearn.metrics import brier_score_loss
+        
+        # Try isotonic calibration
+        calibrator_iso = CalibratedClassifierCV(
             model, method='isotonic', cv='prefit'
         )
-        # Fit calibrator on VALIDATION set only
-        self.calibrator.fit(X_val, y_val)
+        calibrator_iso.fit(X_val, y_val)
+        y_val_pred_iso = calibrator_iso.predict_proba(X_val)[:, 1]
+        brier_iso = brier_score_loss(y_val, y_val_pred_iso)
+        
+        # Try Platt calibration
+        calibrator_platt = CalibratedClassifierCV(
+            model, method='sigmoid', cv='prefit'
+        )
+        calibrator_platt.fit(X_val, y_val)
+        y_val_pred_platt = calibrator_platt.predict_proba(X_val)[:, 1]
+        brier_platt = brier_score_loss(y_val, y_val_pred_platt)
+        
+        # Choose best calibration method and delete the unused one
+        if brier_iso < brier_platt:
+            self.calibrator = calibrator_iso
+            self.calibration_method = 'isotonic'
+            self.log.info(f"Using isotonic calibration (Brier: {brier_iso:.4f} vs {brier_platt:.4f})")
+            # Delete unused calibrator
+            del calibrator_platt
+        else:
+            self.calibrator = calibrator_platt
+            self.calibration_method = 'sigmoid'
+            self.log.info(f"Using Platt calibration (Brier: {brier_platt:.4f} vs {brier_iso:.4f})")
+            # Delete unused calibrator
+            del calibrator_iso
+        
+        # Clean up prediction arrays
+        del y_val_pred_iso, y_val_pred_platt
+        gc.collect()
 
         # CRITICAL: Calculate thresholds using VALIDATION data only
         y_val_pred_proba = self.calibrator.predict_proba(X_val)[:, 1]

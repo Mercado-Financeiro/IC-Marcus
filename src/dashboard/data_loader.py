@@ -30,13 +30,24 @@ class DataLoader:
             DataFrame with run information
         """
         try:
-            experiment = mlflow.get_experiment_by_name(_self.config.experiment_name)
-            if experiment:
-                runs = mlflow.search_runs(
-                    experiment_ids=[experiment.experiment_id],
+            exp = mlflow.get_experiment_by_name(_self.config.experiment_name)
+            if exp is None:
+                # Fallback: tentar experimento padrão usado pelo XGBoost
+                exp = mlflow.get_experiment_by_name('xgboost_optimization')
+            if exp is not None:
+                return mlflow.search_runs(
+                    experiment_ids=[exp.experiment_id],
                     order_by=["start_time DESC"]
                 )
-                return runs
+            # Fallback final: juntar todos os experimentos (limite simples)
+            runs_all = []
+            for e in mlflow.search_experiments():
+                df = mlflow.search_runs(experiment_ids=[e.experiment_id], order_by=["start_time DESC"], max_results=100)
+                if df is not None and not df.empty:
+                    df['experiment'] = e.name
+                    runs_all.append(df)
+            if runs_all:
+                return pd.concat(runs_all, ignore_index=True)
         except Exception as e:
             st.error(f"Erro ao carregar runs MLflow: {e}")
         return pd.DataFrame()

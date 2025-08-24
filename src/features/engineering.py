@@ -3,7 +3,7 @@
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional
-from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.preprocessing import StandardScaler, RobustScaler, MinMaxScaler
 import structlog
 import warnings
 
@@ -60,6 +60,8 @@ class FeatureEngineer:
             self.scaler = StandardScaler()
         elif scaler_type == "robust":
             self.scaler = RobustScaler()
+        elif scaler_type == "minmax":
+            self.scaler = MinMaxScaler()
 
     def create_all_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -103,9 +105,21 @@ class FeatureEngineer:
         df = self.calendar_features.calculate_all(df)
         
         # Remove initial NaN rows (due to rolling windows)
+        # Only drop rows where critical columns have NaN
         initial_rows = len(df)
-        df = df.dropna()
-        rows_dropped = initial_rows - len(df)
+        
+        # Option 1: Drop only first N rows based on largest window
+        max_window = max([5, 10, 20, 30, 60]) if self.include_advanced else 30
+        if len(df) > max_window:
+            df = df.iloc[max_window:]
+            rows_dropped = max_window
+        else:
+            # Option 2: If not enough rows, only drop rows with NaN in critical columns
+            critical_columns = ['close', 'volume', 'returns_1', 'volatility_20']
+            existing_critical = [col for col in critical_columns if col in df.columns]
+            if existing_critical:
+                df = df.dropna(subset=existing_critical)
+            rows_dropped = initial_rows - len(df)
         
         # Save feature names
         self.feature_names = [

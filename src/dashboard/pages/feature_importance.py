@@ -15,8 +15,27 @@ def render_feature_importance_page(config, data_loader: DataLoader):
     """
     st.header("🔍 Importância das Features")
     
-    # Load or generate feature importance data
-    importance_df = data_loader.generate_synthetic_data("feature_importance")
+    # Select MLflow run
+    runs_df = data_loader.load_mlflow_runs()
+    importance_df = None
+    selected_run = None
+    if runs_df is not None and not runs_df.empty:
+        st.subheader("Selecionar Run do MLflow")
+        # Build options mapping label -> run_id
+        def _label(row):
+            name = row.get('tags.mlflow.runName', '') or row.get('run_id', '')
+            start = row.get('start_time')
+            return f"{name} | {row['run_id'][:8]}"
+        options = { _label(row): row['run_id'] for _, row in runs_df.head(50).iterrows() }
+        choice = st.selectbox("Run:", list(options.keys()))
+        selected_run = options.get(choice)
+        if selected_run:
+            st.caption(f"Run selecionada: {selected_run}")
+            importance_df = data_loader.load_feature_importance(selected_run)
+
+    if importance_df is None:
+        st.info("Sem artifact de importância encontrado. Exibindo dados sintéticos para demonstração.")
+        importance_df = data_loader.generate_synthetic_data("feature_importance")
     
     # Render bar chart
     render_importance_chart(importance_df)
