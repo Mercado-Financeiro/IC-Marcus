@@ -327,10 +327,6 @@ class EnhancedXGBoostOptuna:
             early_stopping_rounds = params.pop('early_stopping_rounds')
             validation_fraction = params.pop('validation_fraction')
             
-            # Create XGBoost model
-            params['eval_metric'] = self.config.eval_metric
-            model = XGBClassifier(**params)
-            
             # Cross-validation with embargo
             from ....data.splits import PurgedKFold
             cv = PurgedKFold(
@@ -343,6 +339,10 @@ class EnhancedXGBoostOptuna:
             for fold, (train_idx, val_idx) in enumerate(cv.split(X, y)):
                 X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
                 y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+                
+                # Create XGBoost model for each fold
+                params['eval_metric'] = self.config.eval_metric
+                model = XGBClassifier(**params)
                 
                 # Note: XGBoostPruningCallback not working with XGBoost 2.1.4
                 # Using early stopping via model parameter instead
