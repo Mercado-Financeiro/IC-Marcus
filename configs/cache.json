@@ -1,0 +1,16 @@
+{
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT"
+  ],
+  "timeframes": [
+    "15m",
+    "1h",
+    "4h",
+    "1d"
+  ],
+  "default_lookback_days": 365,
+  "cache_expiry_days": 30,
+  "auto_update": true,
+  "update_interval_hours": 24
+}
