@@ -102,7 +102,33 @@ graph TB
 - 16GB RAM minimum
 - 10GB disk space
 
-### Setup
+### Windows Setup (Recommended)
+
+```powershell
+# Clone repository
+git clone https://github.com/yourusername/ml-trading-pipeline.git
+cd ml-trading-pipeline
+
+# Activate virtual environment (if exists) or create new one
+.\activate_venv.ps1
+# OR create manually:
+# python -m venv venv
+# .\venv\Scripts\Activate.ps1
+
+# Install dependencies
+.\project.ps1 install
+
+# Configure deterministic environment
+.\project.ps1 deterministic
+
+# Download sample data for testing
+.\project.ps1 download-data-fast
+
+# Run quick test to verify installation
+.\project.ps1 train-fast
+```
+
+### Linux/macOS Setup
 
 ```bash
 # Clone repository
@@ -111,14 +137,12 @@ cd ml-trading-pipeline
 
 # Create virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate
 
-# Install dependencies
-pip install -U pip
-pip install -e ".[dev]"  # Install with development dependencies
-
-# Setup pre-commit hooks
-pre-commit install
+# Install dependencies and setup
+make setup
+make install
+make deterministic
 
 # Configure environment
 cp .env.example .env
@@ -127,72 +151,113 @@ cp .env.example .env
 
 ## 🚀 Quick Start
 
-### 1. Download Historical Data
+### Windows System (Recommended)
+The project includes a native Windows command system with PowerShell (`project.ps1`) and batch wrapper (`run.bat`):
+
+```powershell
+# Download historical data (3 years)
+.\project.ps1 download-data
+
+# Quick training for testing (5 minutes)
+.\project.ps1 train-fast
+
+# Train XGBoost with Bayesian optimization (30-60 minutes)
+.\project.ps1 train-xgb-enhanced
+
+# Train LSTM with optimization (60-120 minutes)
+.\project.ps1 train-lstm-enhanced
+
+# Launch Streamlit dashboard
+.\project.ps1 dashboard
+# Access at http://localhost:8501
+
+# Launch MLflow UI
+.\project.ps1 mlflow
+# Access at http://localhost:5000
+```
+
+**Using batch wrapper (simpler):**
+```batch
+run download-data
+run train-fast
+run dashboard
+```
+
+### Linux/macOS System (Legacy)
 ```bash
 # Download BTCUSDT 15m data
-python -m src.data.binance_loader --symbol BTCUSDT --timeframe 15m --days 90
-```
+python scripts/download_historical_data.py --symbol BTCUSDT --timeframe 15m --years 3
 
-### 2. Train Models
-```bash
-# Train XGBoost with optimization
+# Train models using Makefile
 make train-xgb SYMBOL=BTCUSDT TIMEFRAME=15m
-
-# Train LSTM model
 make train-lstm SYMBOL=BTCUSDT TIMEFRAME=15m
-```
 
-### 3. Run Backtest
-```bash
-# Backtest with trained model
-python -m src.backtest.engine --model artifacts/models/xgboost_optimized.pkl
-```
-
-### 4. Launch Dashboard
-```bash
-# Start Streamlit dashboard
+# Launch dashboard
 make dashboard
-# Access at http://localhost:8501
-```
-
-### 5. Start Paper Trading
-```bash
-# Begin paper trading simulation
-python -m src.trading.paper_trader --config configs/paper_trading.yaml
 ```
 
 ## 📁 Project Structure
 
 ```
 .
-├── src/                    # Source code
-│   ├── data/              # Data loaders and validation
-│   ├── features/          # Feature engineering modules
-│   │   ├── adaptive_labeling.py   # Volatility-scaled labeling
-│   │   ├── engineering.py         # Feature creation pipeline
-│   │   ├── microstructure/        # Market microstructure features
-│   │   └── validation/            # Temporal validation utilities
-│   ├── models/            # Model implementations
-│   │   ├── xgb/          # XGBoost with Optuna
-│   │   ├── lstm/         # LSTM with attention
-│   │   └── ensemble.py   # Ensemble methods
-│   ├── backtest/         # Backtesting engine
-│   ├── dashboard/        # Streamlit application
-│   ├── mlops/           # MLOps utilities
-│   ├── trading/         # Trading strategies
-│   ├── utils/           # Helper functions
-│   │   └── logging_config.py  # Centralized logging
-│   └── inference/       # Prediction pipeline
-├── configs/             # YAML configurations
-├── tests/              # Test suite
-│   ├── unit/          # Unit tests
-│   ├── integration/   # Integration tests
-│   └── validation/    # Model validation tests
-├── notebooks/         # Jupyter notebooks
-├── artifacts/         # Model artifacts and reports
-├── data/             # Data storage
-├── scripts/          # Utility scripts
-├── Makefile          # Build automation
+├── src/                          # Source code
+│   ├── data/                    # Data loaders and validation
+│   │   ├── binance_loader.py    # Binance API data fetching
+│   │   ├── database_cache.py    # SQLite caching system
+│   │   └── splits.py           # Temporal data splitting
+│   ├── features/               # Feature engineering modules
+│   │   ├── adaptive_labeling.py # Volatility-scaled labeling
+│   │   ├── engineering.py      # Feature creation pipeline
+│   │   ├── ga_selection.py     # Genetic algorithm feature selection
+│   │   ├── microstructure/     # Market microstructure features
+│   │   └── validation/         # Temporal validation utilities
+│   ├── models/                 # Model implementations
+│   │   ├── xgb/               # XGBoost with Optuna optimization
+│   │   │   └── optuna/        # Advanced Bayesian optimization
+│   │   ├── lstm/              # LSTM with attention mechanisms
+│   │   │   └── optuna/        # LSTM hyperparameter optimization
+│   │   ├── calibration/       # Probability calibration methods
+│   │   └── ensemble.py        # Model ensemble strategies
+│   ├── training/              # Training pipelines (NEW)
+│   │   ├── train_xgb_enhanced.py    # Enhanced XGBoost training
+│   │   ├── train_lstm_enhanced.py   # Enhanced LSTM training
+│   │   └── walkforward.py          # Walk-forward analysis
+│   ├── eval/                  # Evaluation modules (NEW)
+│   │   ├── metrics.py         # Advanced metrics calculation
+│   │   └── outer_walkforward.py # Outer CV evaluation
+│   ├── utils/                 # Enhanced utilities (EXPANDED)
+│   │   ├── config.py          # Configuration management
+│   │   ├── determinism_enhanced.py # Deterministic setup
+│   │   ├── logging.py         # Structured logging
+│   │   └── memory_utils.py    # Memory management
+│   ├── backtest/             # Backtesting engine
+│   ├── dashboard/            # Streamlit application
+│   ├── mlops/               # MLOps utilities
+│   ├── monitoring/          # Model monitoring and drift detection
+│   ├── metrics/             # Trading and ML metrics
+│   └── api/                 # REST API endpoints
+├── configs/                 # YAML configurations
+│   ├── xgb_enhanced.yaml    # Enhanced XGBoost config
+│   └── lstm_enhanced.yaml   # Enhanced LSTM config
+├── tests/                  # Comprehensive test suite
+│   ├── unit/              # Unit tests
+│   ├── integration/       # Integration tests
+│   ├── blindagem/         # Protection tests (data leakage, etc)
+│   └── validation/        # Model validation tests
+├── scripts/               # Utility scripts
+│   └── download_historical_data.py # Data download automation
+├── notebooks/            # Jupyter notebooks
+├── artifacts/           # Model artifacts and reports
+│   ├── models/         # Trained model files
+│   ├── mlruns/         # MLflow experiment tracking
+│   └── reports/        # Generated reports
+├── data/               # Data storage
+│   ├── raw/           # Raw market data
+│   ├── processed/     # Processed features
+│   └── cache/         # SQLite cache database
+├── project.ps1        # Windows PowerShell command center (NEW)
+├── run.bat           # Windows batch wrapper (NEW)
+├── Makefile          # Linux/macOS build automation
 ├── pyproject.toml    # Project configuration
 ├── requirements.txt  # Locked dependencies
 └── README.md         # This file
@@ -236,28 +301,64 @@ python -m src.trading.paper_trader --config configs/paper_trading.yaml
 - **`configs/optuna.yaml`**: Optimization settings
 - **`configs/validation.yaml`**: Temporal validation
 
-### Example: XGBoost Configuration
+### Available Commands (Windows)
+
+**Training Commands:**
+```powershell
+.\project.ps1 train-xgb-enhanced      # XGBoost with Bayesian optimization
+.\project.ps1 train-lstm-enhanced     # LSTM with optimization
+.\project.ps1 train-xgb-production    # Production XGBoost (300 trials)
+.\project.ps1 train-lstm-production   # Production LSTM (200 trials)
+.\project.ps1 train-all               # Train all models
+.\project.ps1 train-fast              # Quick training for testing
+```
+
+**Analysis & Optimization:**
+```powershell
+.\project.ps1 optimize-xgb            # Optimize XGBoost hyperparameters
+.\project.ps1 walkforward             # Run walk-forward analysis
+.\project.ps1 analyze                 # Analyze model results
+```
+
+**Data Management:**
+```powershell
+.\project.ps1 download-data           # Download 3 years of data
+.\project.ps1 download-data-fast      # Download 1 year for testing
+.\project.ps1 cache-info              # View cache statistics
+.\project.ps1 optimize-cache          # Optimize database
+```
+
+### Example: Enhanced XGBoost Configuration
 ```yaml
+# configs/xgb_enhanced.yaml
 model:
+  objective: "binary:logistic"
   n_estimators: 500
   learning_rate: 0.05
   max_depth: 6
   subsample: 0.8
   colsample_bytree: 0.8
-  eval_metric: "aucpr"
+  tree_method: "hist"  # or "gpu_hist" for GPU
   
 optimization:
   n_trials: 100
-  pruner: "hyperband"
+  pruner: "asha"      # Async Successive Halving
+  sampler: "tpe"      # Tree-structured Parzen Estimator
+  timeout: 3600       # 1 hour timeout
   
 validation:
   method: "purged_kfold"
   n_splits: 5
-  embargo: 10  # bars
+  embargo: 10         # bars between train/validation
+  purge: 5           # bars to remove before validation
   
-postprocessing:
-  calibration: "isotonic"
-  threshold_optimization: "ev_based"
+calibration:
+  method: "isotonic"  # or "platt", "temperature"
+  cv_folds: 3
+  
+threshold:
+  method: "ev_based"  # Expected Value optimization
+  metric: "f1"       # or "precision", "recall"
 ```
 
 ## 🧪 Testing

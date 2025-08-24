@@ -40,14 +40,13 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import StandardScaler
 
-# Import our advanced components
-from ...optuna.advanced_optimizer import AdvancedOptimizerConfig
-from ...calibration.tree_calibration import TreeCalibrationSelector, XGBoostCalibrator
-from ...metrics.calibration import comprehensive_calibration_metrics, expected_calibration_error
-from ...validation.walkforward import WalkForwardValidator, WalkForwardConfig, OuterWalkForward
-from ....utils.determinism_enhanced import set_full_determinism, DeterministicContext
-from ....utils.logging import log as logger
-from ....utils.memory_utils import memory_cleanup, cleanup_after_trial, safe_delete, optuna_memory_manager
+# Import our components
+from .calibration import ModelCalibrator
+from .threshold import ThresholdOptimizer
+from .metrics import TradingMetrics
+from .utils import get_logger, calculate_scale_pos_weight, check_constant_predictions
+from src.utils.determinism_enhanced import set_full_determinism, assert_determinism
+from src.utils.logging import log as logger
 
 
 @dataclass
@@ -288,8 +287,8 @@ class EnhancedXGBoostOptuna:
             'grow_policy': trial.suggest_categorical('grow_policy', ['depthwise', 'lossguide']),
             'max_leaves': trial.suggest_int('max_leaves', 0, 256) if trial.suggest_categorical('grow_policy', ['depthwise', 'lossguide']) == 'lossguide' else 0,
             
-            # Sampling parameters
-            'sampling_method': trial.suggest_categorical('sampling_method', ['uniform', 'gradient_based']),
+            # Sampling parameters - gradient_based only works with GPU
+            'sampling_method': 'gradient_based' if use_gpu else 'uniform',
             
             # Advanced parameters
             'max_delta_step': trial.suggest_float('max_delta_step', 0, 10),
@@ -318,9 +317,8 @@ class EnhancedXGBoostOptuna:
         return params
     
     def _create_objective_function(self, X: pd.DataFrame, y: pd.Series):
-        """Create Optuna objective function with XGBoostPruningCallback."""
+        """Create Optuna objective function."""
         
-        @cleanup_after_trial
         def objective(trial: optuna.Trial) -> float:
             # Get hyperparameters
             params = self._create_expanded_search_space(trial)
@@ -346,17 +344,14 @@ class EnhancedXGBoostOptuna:
                 X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
                 y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
                 
-                # Create XGBoostPruningCallback
-                pruning_callback = XGBoostPruningCallback(
-                    trial, f"validation-{self.config.eval_metric}"
-                )
+                # Note: XGBoostPruningCallback not working with XGBoost 2.1.4
+                # Using early stopping via model parameter instead
+                model.early_stopping_rounds = early_stopping_rounds
                 
-                # Fit model with callback
+                # Fit model
                 model.fit(
                     X_train, y_train,
                     eval_set=[(X_val, y_val)],
-                    early_stopping_rounds=early_stopping_rounds,
-                    callbacks=[pruning_callback],
                     verbose=False
                 )
                 
@@ -380,7 +375,7 @@ class EnhancedXGBoostOptuna:
                 scores.append(score)
                 
                 # Clean up model and data after each fold
-                safe_delete(model, X_train, X_val, y_train, y_val)
+                del model, X_train, X_val, y_train, y_val
                 import gc
                 gc.collect()
                 
@@ -473,25 +468,15 @@ class EnhancedXGBoostOptuna:
         # Create objective function
         objective = self._create_objective_function(X, y)
         
-        # Run optimization with memory management
+        # Run optimization
         try:
-            with DeterministicContext(seed=self.config.seed):
-                with optuna_memory_manager():
-                    # Add callback for memory cleanup
-                    def memory_callback(study, trial):
-                        # Log memory every 10 trials
-                        if trial.number % 10 == 0:
-                            from ....utils.memory_utils import log_memory_usage
-                            log_memory_usage(f"Trial {trial.number}")
-                    
-                    self.study.optimize(
-                        objective,
-                        n_trials=self.config.n_trials,
-                        timeout=self.config.timeout,
-                        show_progress_bar=self.config.verbose,
-                        n_jobs=1,  # Always 1 for Optuna to maintain determinism
-                        callbacks=[memory_callback]
-                    )
+            self.study.optimize(
+                objective,
+                n_trials=self.config.n_trials,
+                timeout=self.config.timeout,
+                show_progress_bar=self.config.verbose,
+                n_jobs=1  # Always 1 for Optuna to maintain determinism
+            )
         
         except KeyboardInterrupt:
             logger.info("Optimization interrupted by user")

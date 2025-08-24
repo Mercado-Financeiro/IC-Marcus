@@ -335,6 +335,17 @@ Never Shuffle: shuffle=False enforced everywhere
 
 ---
 
-**Last Updated**: 2025-08-22
-**Version**: 1.0.0
-**Status**: 🟡 Beta (XGBoost optimization in progress, LSTM pending)
+**Last Updated**: 2025-08-24
+**Version**: 2.0.0
+**Status**: 🟢 Production Ready
+
+**Major Updates in v2.0:**
+- ✅ Native Windows command system (`project.ps1` + `run.bat`)
+- ✅ Enhanced training pipelines with Bayesian optimization
+- ✅ Advanced feature selection with Genetic Algorithms
+- ✅ Comprehensive evaluation framework (`src/eval/`)
+- ✅ Production monitoring and drift detection
+- ✅ Enhanced calibration and threshold optimization
+- ✅ REST API for model serving
+- ✅ Improved memory management and deterministic training
+- ✅ Advanced walk-forward analysis with database storage

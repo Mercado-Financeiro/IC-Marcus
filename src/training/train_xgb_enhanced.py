@@ -222,9 +222,9 @@ def main():
     
     try:
         assert_determinism(determinism_results, raise_on_fail=True)
-        print("   ✅ Full determinism verified")
+        print("   [OK] Full determinism verified")
     except RuntimeError as e:
-        print(f"   ⚠️  Partial determinism: {e}")
+        print(f"   [WARNING]  Partial determinism: {e}")
         if not args.fast:
             response = input("Continue with partial determinism? [y/N]: ")
             if response.lower() != 'y':
@@ -233,7 +233,7 @@ def main():
     # 2. Setup MLflow
     print("\n2. Setting up MLflow tracking...")
     mlflow_run = setup_mlflow(args)
-    print(f"   ✅ MLflow run: {mlflow_run.info.run_id}")
+    print(f"   [OK] MLflow run: {mlflow_run.info.run_id}")
     
     # Log determinism results
     mlflow.log_metrics({
@@ -252,7 +252,7 @@ def main():
             start_date=args.start,
             end_date=args.end
         )
-        print(f"   ✅ Data loaded: {len(df):,} bars")
+        print(f"   [OK] Data loaded: {len(df):,} bars")
         
         # Log data statistics
         mlflow.log_metrics({
@@ -271,12 +271,12 @@ def main():
     print("\n4. Engineering features...")
     engineer = FeatureEngineer(scaler_type="minmax")
     features_df = engineer.create_all_features(df)
-    print(f"   ✅ Features created: {features_df.shape[1]} features")
+    print(f"   [OK] Features created: {features_df.shape[1]} features")
     
     # 5. Create labels
     print("\n5. Creating labels...")
     labels = create_labels(df, horizon=args.label_horizon, threshold=args.label_threshold)
-    print(f"   ✅ Labels created: {len(labels):,} samples")
+    print(f"   [OK] Labels created: {len(labels):,} samples")
     
     # 6. Align data
     print("\n6. Aligning features and labels...")
@@ -290,7 +290,7 @@ def main():
     X = X[mask]
     y = y[mask]
     
-    print(f"   ✅ Final dataset: {len(y):,} samples ({y.mean():.2%} positive)")
+    print(f"   [OK] Final dataset: {len(y):,} samples ({y.mean():.2%} positive)")
     
     # Log data quality metrics
     mlflow.log_metrics({
@@ -301,7 +301,7 @@ def main():
     })
     
     if len(y) < 1000:
-        print("   ⚠️  Warning: Very few samples available")
+        print("   [WARNING]  Warning: Very few samples available")
         if not args.fast:
             response = input("Continue with limited data? [y/N]: ")
             if response.lower() != 'y':
@@ -309,7 +309,7 @@ def main():
                 sys.exit(1)
     
     if args.dry_run:
-        print("\n✅ DRY RUN COMPLETED - Setup successful")
+        print("\n[OK] DRY RUN COMPLETED - Setup successful")
         mlflow.end_run(status='FINISHED')
         return
     
@@ -341,7 +341,7 @@ def main():
     
     optimizer = EnhancedXGBoostOptuna(config)
     
-    print(f"   ✅ Optimizer configured:")
+    print(f"   [OK] Optimizer configured:")
     print(f"      - Pruner: {args.pruner} (with XGBoostPruningCallback)")
     print(f"      - Sampler: {args.sampler}")
     print(f"      - Tree method: {args.tree_method}")
@@ -355,7 +355,7 @@ def main():
     try:
         study = optimizer.optimize(X, y)
         print("=" * 50)
-        print("   ✅ Optimization completed successfully!")
+        print("   [OK] Optimization completed successfully!")
         
         # Log optimization results
         mlflow.log_metrics({
@@ -389,7 +389,7 @@ def main():
     y_pred_ev = optimizer.predict(X, use_ev_threshold=True)
     
     # Classification report
-    print(f"\n📊 Classification Report (F1 threshold):")
+    print(f"\n[REPORT] Classification Report (F1 threshold):")
     print(classification_report(y, y_pred, digits=4))
     
     # Calculate metrics
@@ -403,7 +403,7 @@ def main():
         'f1_ev_threshold': f1_score(y, y_pred_ev, zero_division=0)
     }
     
-    print(f"\n📈 Final Metrics:")
+    print(f"\n[METRICS] Final Metrics:")
     for metric_name, metric_value in metrics.items():
         print(f"   {metric_name}: {metric_value:.4f}")
     
@@ -414,10 +414,10 @@ def main():
     try:
         cal_info = optimizer.calibrator.get_calibration_info()
         selected_method = cal_info.get('selected_method', args.calibration)
-        print(f"   📊 Calibration method: {selected_method}")
+        print(f"   [REPORT] Calibration method: {selected_method}")
         
         if 'method_scores' in cal_info:
-            print(f"   🎯 Calibration scores: {cal_info['method_scores']}")
+            print(f"   [TARGET] Calibration scores: {cal_info['method_scores']}")
             
     except Exception as e:
         logger.warning(f"Failed to get calibration info: {e}")
@@ -425,7 +425,7 @@ def main():
     # Feature importance
     try:
         feature_importance = optimizer.get_feature_importance()
-        print(f"\n🔍 Top 10 Features:")
+        print(f"\n[FEATURES] Top 10 Features:")
         for idx, row in feature_importance.head(10).iterrows():
             print(f"   {row['feature']}: {row['importance']:.4f}")
     except Exception as e:
@@ -446,7 +446,7 @@ def main():
         joblib.dump(optimizer, model_path)
         mlflow.log_artifact(str(model_path))
         
-        print(f"   ✅ Model saved: {model_path}")
+        print(f"   [OK] Model saved: {model_path}")
         
         # Save optimization summary
         summary = optimizer.get_optimization_summary()
@@ -457,7 +457,7 @@ def main():
             json.dump(summary, f, indent=2, default=str)
         
         mlflow.log_artifact(str(summary_path))
-        print(f"   ✅ Summary saved: {summary_path}")
+        print(f"   [OK] Summary saved: {summary_path}")
         
         # Save feature importance
         if hasattr(optimizer, 'feature_importances_'):
@@ -465,19 +465,19 @@ def main():
             feature_importance = optimizer.get_feature_importance()
             feature_importance.to_csv(importance_path, index=False)
             mlflow.log_artifact(str(importance_path))
-            print(f"   ✅ Feature importance saved: {importance_path}")
+            print(f"   [OK] Feature importance saved: {importance_path}")
     
     # 12. Final summary
     print("\n" + "=" * 80)
-    print("🎉 ENHANCED XGBOOST TRAINING COMPLETED SUCCESSFULLY!")
+    print("[SUCCESS] ENHANCED XGBOOST TRAINING COMPLETED SUCCESSFULLY!")
     print("=" * 80)
-    print(f"📈 Best Score: {study.best_value:.4f}")
-    print(f"🔥 Final PR-AUC: {metrics['pr_auc']:.4f}")
-    print(f"🎯 Final F1: {metrics['f1_score']:.4f}")
-    print(f"📊 Calibration: {selected_method}")
-    print(f"🌳 Tree method: {args.tree_method}")
-    print(f"⏱️  Duration: {datetime.now() - datetime.fromisoformat(mlflow_run.info.start_time.replace('Z', '+00:00').replace('+00:00', ''))}")
-    print(f"🔬 MLflow Run: {mlflow_run.info.run_id}")
+    print(f"[METRICS] Best Score: {study.best_value:.4f}")
+    print(f"[HOT] Final PR-AUC: {metrics['pr_auc']:.4f}")
+    print(f"[TARGET] Final F1: {metrics['f1_score']:.4f}")
+    print(f"[REPORT] Calibration: {selected_method}")
+    print(f"[TREE] Tree method: {args.tree_method}")
+    print(f"[TIME]  Duration: {datetime.now() - datetime.fromisoformat(mlflow_run.info.start_time.replace('Z', '+00:00').replace('+00:00', ''))}")
+    print(f"[LAB] MLflow Run: {mlflow_run.info.run_id}")
     print("=" * 80)
     
     # End MLflow run
