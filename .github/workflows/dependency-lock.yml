@@ -1,0 +1,106 @@
+name: Dependency Lock File Generation
+
+on:
+  push:
+    paths:
+      - 'requirements.in'
+      - 'pyproject.toml'
+  pull_request:
+    paths:
+      - 'requirements.in'
+      - 'pyproject.toml'
+  workflow_dispatch:
+  schedule:
+    # Run weekly on Sundays at 2 AM UTC
+    - cron: '0 2 * * 0'
+
+jobs:
+  generate-lock:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install pip-tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-tools
+      
+      - name: Generate requirements.txt with hashes
+        run: |
+          # Generate lock file from requirements.in if it exists
+          if [ -f requirements.in ]; then
+            pip-compile --generate-hashes \
+                       --output-file=requirements.lock \
+                       --resolver=backtracking \
+                       --strip-extras \
+                       --verbose \
+                       requirements.in
+            echo "Generated requirements.lock from requirements.in"
+          else
+            echo "requirements.in not found, skipping lock generation"
+          fi
+      
+      - name: Generate dev-requirements.txt with hashes
+        run: |
+          # Generate dev lock file if pyproject.toml exists
+          if [ -f pyproject.toml ]; then
+            pip-compile --extra=dev \
+                       --generate-hashes \
+                       --output-file=dev-requirements.lock \
+                       --resolver=backtracking \
+                       --strip-extras \
+                       --verbose \
+                       pyproject.toml
+            echo "Generated dev-requirements.lock from pyproject.toml"
+          else
+            echo "pyproject.toml not found, skipping dev lock generation"
+          fi
+      
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if git diff --quiet; then
+            echo "No changes to lock files"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "Lock files have been updated"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            git diff --stat
+          fi
+      
+      - name: Create Pull Request
+        if: steps.check_changes.outputs.has_changes == 'true' && github.event_name != 'pull_request'
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'chore: update dependency lock files'
+          title: 'chore: update dependency lock files'
+          body: |
+            This PR updates the dependency lock files with the latest compatible versions.
+            
+            - Updated `requirements.lock` with hashed dependencies
+            - Updated `dev-requirements.lock` with development dependencies
+            
+            Please review the changes and ensure all tests pass before merging.
+          branch: update-dependency-locks
+          delete-branch: true
+          labels: |
+            dependencies
+            automated
+      
+      - name: Upload lock files as artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: dependency-locks
+          path: |
+            requirements.lock
+            dev-requirements.lock

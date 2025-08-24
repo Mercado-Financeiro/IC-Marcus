@@ -1,0 +1,150 @@
+# LSTM Optimized Configuration
+# Simplified for better generalization and faster training
+
+# Core settings
+seed: 42
+deterministic: true
+
+# Model architecture - simplified
+model:
+  # Reduced complexity
+  sequence_length: 32    # Reduced from 64 (less memory, faster)
+  hidden_size: 64        # Reduced from 128 (less overfitting)
+  num_layers: 1          # Reduced from 2 (simpler is better)
+  dropout: 0.3           # Increased from 0.2 (more regularization)
+  
+  # No attention or bidirectional for baseline
+  bidirectional: false
+  attention: false
+  
+# Training parameters - optimized
+training:
+  # Optimizer
+  learning_rate: 0.0005  # Reduced from 0.001 (more stable)
+  weight_decay: 1e-4     # L2 regularization
+  
+  # Batch and epochs
+  batch_size: 512        # Increased from 256 (more efficient)
+  epochs: 30             # Reduced from 100 (early stopping will handle)
+  
+  # Early stopping
+  early_stopping_patience: 5  # Reduced from 10 (stop earlier)
+  
+  # Gradient clipping
+  gradient_clip_norm: 1.0
+  
+# Feature configuration for LSTM
+features:
+  # LSTM prefers smoother features
+  use_technical_indicators: true
+  use_price_features: true
+  use_microstructure: false  # Too noisy for LSTM
+  
+  # Feature engineering specific for LSTM
+  smoothing_windows: [5, 10, 20]  # Apply moving averages
+  differencing: true               # Make series stationary
+  
+  # Feature selection
+  max_features: 50               # Less than XGBoost (LSTM is slower)
+  selection_method: 'correlation'  # Select features with temporal correlation
+  
+# Data preprocessing
+preprocessing:
+  # Scaling is critical for LSTM
+  scaler: 'standard'  # StandardScaler
+  
+  # Sequence creation
+  stride: 1           # Step between sequences
+  
+  # Handle missing values
+  fillna_method: 'forward'
+  
+# Validation configuration
+validation:
+  # Temporal validation only
+  method: 'walk_forward'
+  
+  # Walk-forward parameters
+  initial_window: 1000  # Initial training size
+  step_size: 100       # Step forward size
+  validation_size: 200  # Validation window
+  
+  # Purged cross-validation alternative
+  purged_cv:
+    n_splits: 3        # Less splits (LSTM is slow)
+    embargo: 10
+    purge: 5
+
+# Threshold optimization
+threshold:
+  optimization_metric: 'expected_value'
+  n_thresholds: 50  # Less than XGBoost (faster)
+  
+  # Cost structure
+  costs:
+    tp: 0.005
+    fp: -0.003
+    tn: 0.0
+    fn: -0.001
+    fee_bps: 5
+    slippage_bps: 3
+
+# Memory optimization
+memory:
+  # PyTorch specific
+  pin_memory: true
+  num_workers: 4
+  persistent_workers: true
+  
+  # Clear cache periodically
+  clear_cache_every_n_epochs: 5
+  
+  # Mixed precision (if GPU available)
+  use_amp: false  # Disabled for stability
+  
+# Hardware settings
+hardware:
+  device: 'auto'  # auto-detect cuda/cpu
+  
+  # Force CPU for perfect determinism
+  force_cpu: false
+  
+  # CUDA settings (if GPU)
+  cudnn_benchmark: false  # For determinism
+  cudnn_deterministic: true
+
+# Monitoring and logging
+logging:
+  # Track training progress
+  log_every_n_epochs: 5
+  
+  # Save best model only
+  save_best_only: true
+  
+  # Metrics to track
+  track_metrics:
+    - loss
+    - accuracy
+    - f1_score
+    - auc_pr
+    
+# Fast mode for testing
+fast_mode:
+  enabled: false
+  sequence_length: 16
+  hidden_size: 32
+  batch_size: 128
+  epochs: 10
+  
+# Production settings
+production:
+  # Ensemble weight (when combined with XGBoost)
+  ensemble_weight: 0.3  # Lower weight than XGBoost (0.7)
+  
+  # Prediction caching
+  cache_predictions: true
+  cache_ttl_minutes: 60
+  
+  # Performance requirements
+  max_inference_time_ms: 100
+  min_prediction_confidence: 0.3

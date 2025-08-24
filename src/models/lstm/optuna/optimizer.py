@@ -11,7 +11,16 @@ from typing import Dict, Tuple, Optional, Any
 import optuna
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import f1_score, precision_recall_curve, auc
+from sklearn.metrics import f1_score, precision_recall_curve, auc, brier_score_loss
+
+# Import our custom modules
+try:
+    from ...metrics.quality_gates import QualityGates
+    from ...metrics.pr_auc import calculate_pr_auc_normalized
+    from ...calibration.beta import BetaCalibration
+    CUSTOM_MODULES = True
+except ImportError:
+    CUSTOM_MODULES = False
 
 from .config import LSTMOptunaConfig
 from .model import LSTMModel, AttentionLSTM
@@ -66,7 +75,7 @@ class LSTMOptuna:
         )
     
     def _objective(self, trial: optuna.Trial, X: np.ndarray, y: np.ndarray) -> float:
-        """Objective function for Optuna optimization."""
+        """Objective function for Optuna optimization with PR-AUC focus."""
         # Suggest hyperparameters
         params = {
             'seq_len': trial.suggest_int('seq_len', self.config.seq_len_min, self.config.seq_len_max),
@@ -78,19 +87,43 @@ class LSTMOptuna:
             'bidirectional': trial.suggest_categorical('bidirectional', [True, False])
         }
         
+        # Initialize quality gates if available
+        gates = QualityGates() if CUSTOM_MODULES else None
+        
         # Perform cross-validation with embargo
         from src.features.validation.temporal import TemporalValidator, TemporalValidationConfig
         val_config = TemporalValidationConfig(n_splits=self.config.cv_folds, embargo=10)
         validator = TemporalValidator(val_config)
         scores = []
+        pr_aucs = []
         
         for fold, (train_idx, val_idx) in enumerate(validator.split(X, y, strategy='purged_kfold')):
             X_train, X_val = X[train_idx], X[val_idx]
             y_train, y_val = y[train_idx], y[val_idx]
             
-            # Train model
-            model, score = self._train_model(X_train, y_train, X_val, y_val, params)
-            scores.append(score)
+            # Train model and get PR-AUC
+            model, pr_auc, val_proba = self._train_model_with_pr_auc(X_train, y_train, X_val, y_val, params, trial, fold)
+            
+            if model is None:
+                # Training failed, return bad score
+                return -1.0
+            
+            # Calculate normalized PR-AUC
+            prevalence = y_val.mean()
+            if CUSTOM_MODULES:
+                _, pr_auc_norm, _ = calculate_pr_auc_normalized(y_val, val_proba)
+            else:
+                pr_auc_norm = (pr_auc - prevalence) / (1 - prevalence) if prevalence < 1 else 0
+            
+            # Check quality gates
+            if CUSTOM_MODULES and gates:
+                pr_gate = gates.check_pr_auc_gate(y_val, val_proba, return_details=False)
+                if not pr_gate['passed'] and fold > 0:  # Give first fold a chance
+                    log.warning(f"Trial {trial.number} failed PR-AUC gate at fold {fold}")
+                    raise optuna.TrialPruned()
+            
+            scores.append(pr_auc_norm)
+            pr_aucs.append(pr_auc)
             
             # Clean up model and data after fold
             if model is not None:
@@ -100,9 +133,12 @@ class LSTMOptuna:
                 torch.cuda.empty_cache()
             gc.collect()
             
-            # Report intermediate value for pruning
-            trial.report(score, fold)
+            # CRITICAL: Report PR-AUC for pruning
+            trial.report(pr_auc_norm, fold)
+            
+            # CRITICAL: Check if should prune
             if trial.should_prune():
+                log.info(f"Pruning trial {trial.number} at fold {fold} (PR-AUC: {pr_auc:.4f})")
                 raise optuna.TrialPruned()
         
         # Final cleanup
@@ -110,12 +146,16 @@ class LSTMOptuna:
             torch.cuda.empty_cache()
         gc.collect()
         
-        return np.mean(scores)
+        # Return mean normalized PR-AUC as optimization target
+        mean_score = np.mean(scores)
+        log.info(f"Trial {trial.number} completed: mean PR-AUC = {np.mean(pr_aucs):.4f}, normalized = {mean_score:.4f}")
+        return mean_score
     
-    def _train_model(self, X_train: np.ndarray, y_train: np.ndarray, 
-                     X_val: np.ndarray, y_val: np.ndarray, 
-                     params: Dict, max_epochs: int = None) -> Tuple[nn.Module, float]:
-        """Train a single model with given parameters."""
+    def _train_model_with_pr_auc(self, X_train: np.ndarray, y_train: np.ndarray, 
+                                 X_val: np.ndarray, y_val: np.ndarray, 
+                                 params: Dict, trial: optuna.Trial, fold: int,
+                                 max_epochs: int = None) -> Tuple[nn.Module, float, np.ndarray]:
+        """Train model with PR-AUC optimization and proper pruning."""
         if max_epochs is None:
             max_epochs = self.config.max_epochs
             
@@ -125,7 +165,7 @@ class LSTMOptuna:
         X_val_seq, y_val_seq = create_sequences(X_val, y_val, seq_len)
         
         if len(X_train_seq) == 0 or len(X_val_seq) == 0:
-            return None, 0.0
+            return None, 0.0, np.array([])
         
         # Create model
         n_features = X_train_seq.shape[-1]
@@ -138,29 +178,95 @@ class LSTMOptuna:
             output_size=1
         ).to(self.device)
         
-        # Train using the training module
-        trained_model = train_model(
-            model, X_train_seq, y_train_seq, X_val_seq, y_val_seq,
-            self.device, epochs=max_epochs, batch_size=self.config.batch_size,
-            learning_rate=params['learning_rate']
-        )
+        # Setup optimizer and loss
+        optimizer = optim.Adam(model.parameters(), lr=params['learning_rate'])
+        criterion = nn.BCEWithLogitsLoss()
         
-        # Calculate validation score
+        # Training loop with epoch-level pruning
+        best_pr_auc = 0
+        patience_counter = 0
+        
+        for epoch in range(max_epochs):
+            # Train epoch
+            model.train()
+            train_loss = 0
+            for batch_start in range(0, len(X_train_seq), self.config.batch_size):
+                batch_end = min(batch_start + self.config.batch_size, len(X_train_seq))
+                X_batch = torch.FloatTensor(X_train_seq[batch_start:batch_end]).to(self.device)
+                y_batch = torch.FloatTensor(y_train_seq[batch_start:batch_end]).to(self.device)
+                
+                optimizer.zero_grad()
+                outputs = model(X_batch).squeeze()
+                loss = criterion(outputs, y_batch)
+                loss.backward()
+                optimizer.step()
+                
+                train_loss += loss.item()
+                del X_batch, y_batch, outputs
+            
+            # Validate and calculate PR-AUC
+            model.eval()
+            with torch.no_grad():
+                X_val_tensor = torch.FloatTensor(X_val_seq).to(self.device)
+                y_pred_logits = model(X_val_tensor).cpu().numpy().flatten()
+                y_pred_proba = 1 / (1 + np.exp(-y_pred_logits))  # Sigmoid
+                del X_val_tensor
+            
+            # Calculate PR-AUC
+            precision, recall, _ = precision_recall_curve(y_val_seq, y_pred_proba)
+            pr_auc = auc(recall, precision)
+            
+            # CRITICAL: Report to Optuna for pruning (every 5 epochs)
+            if epoch % 5 == 0:
+                # Calculate normalized PR-AUC for reporting
+                prevalence = y_val_seq.mean()
+                pr_auc_norm = (pr_auc - prevalence) / (1 - prevalence) if prevalence < 1 else 0
+                
+                # Report current performance
+                intermediate_value = pr_auc_norm
+                trial.report(intermediate_value, fold * max_epochs + epoch)
+                
+                # Check if should prune
+                if trial.should_prune():
+                    log.info(f"Pruning trial {trial.number} at epoch {epoch} (PR-AUC: {pr_auc:.4f})")
+                    cleanup_model(model)
+                    raise optuna.TrialPruned()
+            
+            # Early stopping based on PR-AUC
+            if pr_auc > best_pr_auc:
+                best_pr_auc = pr_auc
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= self.config.early_stopping_patience:
+                    break
+        
+        # Final validation
         model.eval()
         with torch.no_grad():
             X_val_tensor = torch.FloatTensor(X_val_seq).to(self.device)
-            y_pred = model(X_val_tensor).cpu().numpy().flatten()
-            score = f1_score(y_val_seq, (y_pred > 0.5).astype(int), zero_division=0)
-            # Clean up tensor
+            y_pred_logits = model(X_val_tensor).cpu().numpy().flatten()
+            y_pred_proba = 1 / (1 + np.exp(-y_pred_logits))  # Sigmoid
             del X_val_tensor
         
-        # Clean up training data and tensors
-        safe_delete(X_train_seq, y_train_seq, X_val_seq, y_val_seq, X_val_tensor)
+        # Clean up training data
+        safe_delete(X_train_seq, y_train_seq, X_val_seq, y_val_seq)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
         
-        return model, score
+        return model, best_pr_auc, y_pred_proba
+    
+    def _train_model(self, X_train: np.ndarray, y_train: np.ndarray, 
+                     X_val: np.ndarray, y_val: np.ndarray, 
+                     params: Dict, max_epochs: int = None) -> Tuple[nn.Module, float]:
+        """Legacy training method for compatibility."""
+        # Use new method but return only model and score
+        model, pr_auc, _ = self._train_model_with_pr_auc(
+            X_train, y_train, X_val, y_val, params, 
+            optuna.Trial(None, None), 0, max_epochs
+        )
+        return model, pr_auc
     
     def _train_final_model(self, X: np.ndarray, y: np.ndarray, 
                           params: Dict, max_epochs: int = None) -> nn.Module:
@@ -412,13 +518,21 @@ class LSTMOptuna:
                     if check_constant_predictions(val_preds):
                         return 0.0
                     
-                    # Calculate F1 score
-                    val_pred_binary = (val_preds >= 0.5).astype(int)
-                    score = f1_score(y_val, val_pred_binary)
-                    cv_scores.append(score)
+                    # Calculate PR-AUC as primary metric
+                    precision, recall, _ = precision_recall_curve(y_val, val_preds)
+                    pr_auc = auc(recall, precision)
                     
-                    # Report intermediate value for pruning
-                    trial.report(score, fold)
+                    # Normalize PR-AUC
+                    prevalence = y_val.mean()
+                    if CUSTOM_MODULES:
+                        _, pr_auc_norm, _ = calculate_pr_auc_normalized(y_val, val_preds)
+                    else:
+                        pr_auc_norm = (pr_auc - prevalence) / (1 - prevalence) if prevalence < 1 else 0
+                    
+                    cv_scores.append(pr_auc_norm)
+                    
+                    # CRITICAL: Report PR-AUC for pruning
+                    trial.report(pr_auc_norm, fold)
                 
                     # Handle pruning
                     if trial.should_prune():

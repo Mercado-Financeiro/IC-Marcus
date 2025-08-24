@@ -1,0 +1,364 @@
+name: Security Scanning
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Run every Monday at 9 AM UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  # Python security scanning
+  python-security:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install bandit[toml] safety pip-audit semgrep
+      
+      - name: Run Bandit
+        run: |
+          bandit -r src -f sarif -o bandit.sarif || true
+          bandit -r src -f txt || true
+      
+      - name: Upload Bandit SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: bandit.sarif
+        continue-on-error: true
+      
+      - name: Run Safety check
+        run: |
+          pip install -r requirements.txt
+          safety check --json --output safety-report.json || true
+          safety check || true
+        continue-on-error: true
+      
+      - name: Run pip-audit
+        run: |
+          pip-audit -r requirements.txt --desc --format json --output pip-audit.json || true
+          pip-audit -r requirements.txt --desc || true
+        continue-on-error: true
+      
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/security-audit
+            p/python
+            p/django
+            p/flask
+            p/jwt
+            p/owasp-top-ten
+        continue-on-error: true
+
+  # Container scanning
+  container-security:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: deployment/Dockerfile
+          format: sarif
+          output-file: hadolint.sarif
+          no-fail: true
+      
+      - name: Upload Hadolint SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: hadolint.sarif
+        continue-on-error: true
+      
+      - name: Run Trivy container scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: 'deployment/Dockerfile'
+          format: 'sarif'
+          output: 'trivy-container.sarif'
+        continue-on-error: true
+      
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-container.sarif
+        continue-on-error: true
+
+  # Secret scanning
+  secret-scanning:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for better detection
+      
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_SUMMARY: true
+      
+      - name: Run TruffleHog
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --debug --only-verified
+        continue-on-error: true
+
+  # Dependency scanning
+  dependency-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pip-licenses cyclonedx-bom
+      
+      - name: Generate SBOM
+        run: |
+          # Generate Software Bill of Materials
+          cyclonedx-py -r requirements.txt -o sbom.json --format json
+          cyclonedx-py -r requirements.txt -o sbom.xml --format xml
+          echo "SBOM generated successfully"
+      
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v3
+        with:
+          name: sbom
+          path: |
+            sbom.json
+            sbom.xml
+      
+      - name: Check licenses
+        run: |
+          pip-licenses --format=markdown --output-file=licenses.md
+          pip-licenses --fail-on="GPL;LGPL;AGPL;SSPL" || echo "Warning: Found copyleft licenses"
+      
+      - name: Upload license report
+        uses: actions/upload-artifact@v3
+        with:
+          name: license-report
+          path: licenses.md
+      
+      - name: OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: 'ml-trading-system'
+          path: '.'
+          format: 'ALL'
+          args: >
+            --enableRetired
+            --enableExperimental
+        continue-on-error: true
+      
+      - name: Upload OWASP reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: owasp-reports
+          path: reports/
+
+  # CodeQL analysis
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ['python']
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended,security-and-quality
+      
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+      
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{matrix.language}}"
+
+  # Security scorecard
+  scorecard:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    permissions:
+      security-events: write
+      id-token: write
+      contents: read
+      actions: read
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      
+      - name: Run OSSF Scorecard
+        uses: ossf/scorecard-action@v2.3.1
+        with:
+          results_file: scorecard.sarif
+          results_format: sarif
+          publish_results: true
+      
+      - name: Upload Scorecard SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: scorecard.sarif
+
+  # ML-specific security checks
+  ml-security:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install ML security tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install adversarial-robustness-toolbox foolbox
+      
+      - name: Check for model poisoning indicators
+        run: |
+          python -c "
+import os
+import hashlib
+import json
+
+# Check model file integrity
+model_files = [
+    'artifacts/models/xgboost_optimized.pkl',
+    'artifacts/models/lstm_fixed_20250824_090245.pth'
+]
+
+checksums = {}
+for model_file in model_files:
+    if os.path.exists(model_file):
+        with open(model_file, 'rb') as f:
+            checksums[model_file] = hashlib.sha256(f.read()).hexdigest()
+            print(f'Model checksum - {model_file}: {checksums[model_file]}')
+
+# Save checksums for comparison
+with open('model_checksums.json', 'w') as f:
+    json.dump(checksums, f, indent=2)
+
+print('Model integrity check completed')
+"
+      
+      - name: Check for data leakage patterns
+        run: |
+          python -c "
+import re
+import os
+
+# Patterns that might indicate data leakage
+leakage_patterns = [
+    r'\.iloc\[:\]',  # Using all data
+    r'test.*train',  # Test data in training
+    r'train.*test',  # Training data in test
+    r'shuffle\s*=\s*True.*time',  # Shuffling time series
+    r'random_state\s*=\s*None',  # Non-deterministic splitting
+]
+
+issues = []
+for root, dirs, files in os.walk('src'):
+    # Skip __pycache__ directories
+    dirs[:] = [d for d in dirs if d != '__pycache__']
+    
+    for file in files:
+        if file.endswith('.py'):
+            filepath = os.path.join(root, file)
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+                for pattern in leakage_patterns:
+                    if re.search(pattern, content, re.IGNORECASE):
+                        issues.append(f'{filepath}: Potential leakage pattern: {pattern}')
+
+if issues:
+    print('Potential data leakage detected:')
+    for issue in issues[:10]:  # Limit output
+        print(f'  - {issue}')
+else:
+    print('No obvious data leakage patterns detected')
+"
+        continue-on-error: true
+
+  # Security summary
+  security-summary:
+    needs: [python-security, container-security, secret-scanning, dependency-check, ml-security]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Security scan summary
+        run: |
+          echo "## Security Scan Summary"
+          echo ""
+          echo "| Check | Status |"
+          echo "|-------|--------|"
+          echo "| Python Security | ${{ needs.python-security.result }} |"
+          echo "| Container Security | ${{ needs.container-security.result }} |"
+          echo "| Secret Scanning | ${{ needs.secret-scanning.result }} |"
+          echo "| Dependency Check | ${{ needs.dependency-check.result }} |"
+          echo "| ML Security | ${{ needs.ml-security.result }} |"
+          echo ""
+          
+          if [ "${{ needs.secret-scanning.result }}" == "failure" ]; then
+            echo "⚠️ **CRITICAL**: Secret scanning failed! Review immediately."
+            exit 1
+          fi
+          
+          if [ "${{ needs.python-security.result }}" == "failure" ] || \
+             [ "${{ needs.container-security.result }}" == "failure" ]; then
+            echo "⚠️ **WARNING**: Security issues detected. Review before merging."
+          fi
+          
+          echo "✅ Security scan completed. Review individual reports for details."

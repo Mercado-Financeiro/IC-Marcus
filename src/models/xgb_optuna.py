@@ -11,6 +11,26 @@ from sklearn.metrics import (
     f1_score, precision_recall_curve, auc, roc_auc_score,
     brier_score_loss, matthews_corrcoef, confusion_matrix
 )
+# Import our new modules
+try:
+    from .metrics.quality_gates import QualityGates, calculate_comprehensive_metrics
+    from .metrics.pr_auc import calculate_pr_auc_normalized
+    from .calibration.beta import BetaCalibration, compare_calibration_methods
+    CUSTOM_MODULES = True
+except ImportError:
+    CUSTOM_MODULES = False
+    import sys
+    from pathlib import Path
+    # Add parent paths for imports
+    base_path = Path(__file__).parent
+    sys.path.insert(0, str(base_path))
+    try:
+        from metrics.quality_gates import QualityGates, calculate_comprehensive_metrics
+        from metrics.pr_auc import calculate_pr_auc_normalized
+        from calibration.beta import BetaCalibration, compare_calibration_methods
+        CUSTOM_MODULES = True
+    except ImportError:
+        CUSTOM_MODULES = False
 from scipy.stats.mstats import winsorize
 import optuna
 from optuna.pruners import MedianPruner, HyperbandPruner, SuccessiveHalvingPruner
@@ -415,7 +435,7 @@ class XGBoostOptuna:
     def _create_objective(
         self, X: pd.DataFrame, y: pd.Series, sample_weights: Optional[np.ndarray] = None
     ):
-        """Create objective function for Optuna.
+        """Create objective function for Optuna with PR-AUC optimization.
 
         Args:
             X: Features
@@ -423,10 +443,13 @@ class XGBoostOptuna:
             sample_weights: Optional sample weights
 
         Returns:
-            Objective function
+            Objective function optimizing PR-AUC
         """
         # Calculate scale_pos_weight consistently
         pos_weight = self._calculate_scale_pos_weight(y)
+        
+        # Initialize quality gates if available
+        gates = QualityGates() if CUSTOM_MODULES else None
 
         def objective(trial):
             # Get hyperparameters
@@ -478,12 +501,17 @@ class XGBoostOptuna:
                 else:
                     w_train = None
 
-                # Create model with early stopping set via constructor for broad compatibility
+                # Setup callbacks for pruning - disabled for now due to version compatibility
+                callbacks = []
+                # Note: XGBoostPruningCallback requires specific XGBoost version
+                # For now, we'll use manual pruning via trial.report() instead
+                
+                # Create model with early stopping
                 params_with_es = params.copy()
                 params_with_es['early_stopping_rounds'] = 50
                 model = xgb.XGBClassifier(**params_with_es)
 
-                # Fit model with early stopping via fit kwargs (broadly compatible)
+                # Fit model with PR-AUC as primary metric
                 model.set_params(eval_metric='aucpr')
                 model.fit(
                     X_train, y_train,
@@ -515,39 +543,47 @@ class XGBoostOptuna:
                     self.log.warning("sample_predictions", samples=y_pred_proba[:10].tolist())
                     return -1.0  # Penalize trials with constant predictions
 
-                # Optimize threshold for F1
-                threshold = self._optimize_threshold_f1(y_val, y_pred_proba)
-                y_pred = (y_pred_proba >= threshold).astype(int)
-
-                # Calculate metrics
-                f1 = f1_score(y_val, y_pred, zero_division=0)
-
-                # PR-AUC
+                # Calculate PR-AUC as primary metric
                 precision, recall, _ = precision_recall_curve(y_val, y_pred_proba)
                 pr_auc = auc(recall, precision)
                 
-                # Calculate prevalence and normalized AUPRC
+                # Calculate normalized PR-AUC
                 prevalence = y_val.mean()
-                pr_auc_norm = (pr_auc - prevalence) / (1 - prevalence) if prevalence < 1 else 0
-
-                # Brier score (lower is better)
+                if CUSTOM_MODULES:
+                    pr_auc, pr_auc_norm, baseline = calculate_pr_auc_normalized(y_val, y_pred_proba)
+                else:
+                    pr_auc_norm = (pr_auc - prevalence) / (1 - prevalence) if prevalence < 1 else 0
+                    baseline = prevalence
+                
+                # Quality gate check if available
+                if CUSTOM_MODULES and gates:
+                    pr_gate = gates.check_pr_auc_gate(y_val, y_pred_proba, return_details=False)
+                    if not pr_gate['passed']:
+                        # Penalize trials that don't meet minimum PR-AUC requirement
+                        self.log.warning("trial_failed_pr_gate", trial=trial.number, pr_auc=pr_auc, required=baseline*1.2)
+                        return -1.0  # Heavy penalty
+                
+                # Calculate additional metrics for composite score
                 brier = brier_score_loss(y_val, y_pred_proba)
-
-                # Matthews correlation coefficient
+                
+                # Optimize threshold for F1 (secondary metric)
+                threshold = self._optimize_threshold_f1(y_val, y_pred_proba)
+                y_pred = (y_pred_proba >= threshold).astype(int)
+                f1 = f1_score(y_val, y_pred, zero_division=0)
                 mcc = matthews_corrcoef(y_val, y_pred)
-
-                # Use normalized PR-AUC as primary metric
-                # Composite score: 60% PR-AUC_norm, 25% F1, 15% MCC, penalty from Brier
-                score = 0.6 * pr_auc_norm + 0.25 * f1 + 0.15 * mcc - 0.1 * brier
+                
+                # Primary optimization: 80% PR-AUC, 20% calibration (lower Brier is better)
+                # This focuses on PR-AUC while ensuring good calibration
+                score = 0.8 * pr_auc_norm + 0.2 * (1 - min(brier, 1.0))
                 scores.append(score)
 
                 # Log trial metrics for debugging
                 if fold_idx == 0:  # Log only first fold to avoid spam
                     self.log.info(
                         f"Trial {trial.number} Fold {fold_idx}: "
-                        f"f1={f1:.4f}, pr_auc={pr_auc:.4f}, pr_auc_norm={pr_auc_norm:.4f}, "
-                        f"prevalence={prevalence:.3f}, mcc={mcc:.4f}, brier={brier:.4f}, "
-                        f"score={score:.4f}"
+                        f"PR-AUC={pr_auc:.4f} (norm={pr_auc_norm:.4f}, baseline={baseline:.3f}), "
+                        f"Brier={brier:.4f}, F1={f1:.4f}, MCC={mcc:.4f}, "
+                        f"Score={score:.4f}"
                     )
 
                 # Clean up model and data after fold
@@ -772,8 +808,14 @@ class XGBoostOptuna:
         model = xgb.XGBClassifier(**params)
         model.fit(X_train, y_train, sample_weight=sample_weights, verbose=False)
 
-        # CRITICAL: Compare calibration methods and choose best based on Brier Score
+        # CRITICAL: Compare calibration methods including Beta calibration
         from sklearn.metrics import brier_score_loss
+        
+        # Get uncalibrated predictions
+        y_val_pred_uncal = model.predict_proba(X_val)[:, 1]
+        brier_uncal = brier_score_loss(y_val, y_val_pred_uncal)
+        
+        calibration_results = {}
         
         # Try isotonic calibration
         calibrator_iso = CalibratedClassifierCV(
@@ -782,6 +824,7 @@ class XGBoostOptuna:
         calibrator_iso.fit(X_val, y_val)
         y_val_pred_iso = calibrator_iso.predict_proba(X_val)[:, 1]
         brier_iso = brier_score_loss(y_val, y_val_pred_iso)
+        calibration_results['isotonic'] = (calibrator_iso, brier_iso)
         
         # Try Platt calibration
         calibrator_platt = CalibratedClassifierCV(
@@ -790,23 +833,51 @@ class XGBoostOptuna:
         calibrator_platt.fit(X_val, y_val)
         y_val_pred_platt = calibrator_platt.predict_proba(X_val)[:, 1]
         brier_platt = brier_score_loss(y_val, y_val_pred_platt)
+        calibration_results['platt'] = (calibrator_platt, brier_platt)
         
-        # Choose best calibration method and delete the unused one
-        if brier_iso < brier_platt:
-            self.calibrator = calibrator_iso
-            self.calibration_method = 'isotonic'
-            self.log.info(f"Using isotonic calibration (Brier: {brier_iso:.4f} vs {brier_platt:.4f})")
-            # Delete unused calibrator
-            del calibrator_platt
-        else:
-            self.calibrator = calibrator_platt
-            self.calibration_method = 'sigmoid'
-            self.log.info(f"Using Platt calibration (Brier: {brier_platt:.4f} vs {brier_iso:.4f})")
-            # Delete unused calibrator
-            del calibrator_iso
+        # Try Beta calibration if available
+        if CUSTOM_MODULES:
+            try:
+                beta_cal = BetaCalibration(method='brier')
+                beta_cal.fit(y_val_pred_uncal, y_val)
+                y_val_pred_beta = beta_cal.transform(y_val_pred_uncal)
+                brier_beta = brier_score_loss(y_val, y_val_pred_beta)
+                
+                # Create wrapper for consistency
+                class BetaWrapper:
+                    def __init__(self, model, beta_cal):
+                        self.model = model
+                        self.beta_cal = beta_cal
+                    def predict_proba(self, X):
+                        proba = self.model.predict_proba(X)[:, 1]
+                        calibrated = self.beta_cal.transform(proba)
+                        return np.column_stack([1 - calibrated, calibrated])
+                
+                calibrator_beta = BetaWrapper(model, beta_cal)
+                calibration_results['beta'] = (calibrator_beta, brier_beta)
+                self.log.info(f"Beta calibration: a={beta_cal.a_:.3f}, b={beta_cal.b_:.3f}, Brier={brier_beta:.4f}")
+            except Exception as e:
+                self.log.warning("beta_calibration_failed", error=str(e))
         
-        # Clean up prediction arrays
-        del y_val_pred_iso, y_val_pred_platt
+        # Choose best calibration method
+        best_method = min(calibration_results.keys(), key=lambda k: calibration_results[k][1])
+        self.calibrator, best_brier = calibration_results[best_method]
+        self.calibration_method = best_method
+        
+        self.log.info(
+            f"Calibration comparison - Uncalibrated: {brier_uncal:.4f}, "
+            f"Isotonic: {brier_iso:.4f}, Platt: {brier_platt:.4f}"
+            + (f", Beta: {calibration_results['beta'][1]:.4f}" if 'beta' in calibration_results else "")
+            + f" -> Using {best_method} (Brier: {best_brier:.4f})"
+        )
+        
+        # Clean up unused calibrators
+        for method, (cal, _) in calibration_results.items():
+            if method != best_method:
+                del cal
+        del y_val_pred_iso, y_val_pred_platt, y_val_pred_uncal
+        if 'beta' in calibration_results:
+            del y_val_pred_beta
         gc.collect()
 
         # CRITICAL: Calculate thresholds using VALIDATION data only

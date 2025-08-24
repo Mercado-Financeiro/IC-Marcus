@@ -101,9 +101,39 @@ test_xgb_real_simple.py
 # Arquivos de monitoramento temporários
 scripts/monitor_optimization.py
 scripts/monitor_training.py
+monitor_training.py
 
 # Arquivos de deploy específicos
 scripts/deploy_model.py
 scripts/test_model_registry.py
 scripts/detect_secrets.py
 scripts/security_audit.py
+
+# Scripts PowerShell temporários
+*.ps1
+activate_venv.ps1
+check_venv.ps1
+disable_extensions.ps1
+install_batch.ps1
+list_extensions.ps1
+quick_venv.ps1
+setup_venv_*.ps1
+
+# Scripts Python temporários na raiz
+test_*.py
+run_optimization_simple.py
+train_xgboost_production.py
+
+# Bancos de dados locais
+*.db
+lstm_optimal_study.db
+
+# MLflow runs locais
+mlruns/
+
+# Arquivos CSV temporários
+feature_importance.csv
+selected_features.csv
+
+# Ambiente virtual Windows
+venv_windows/

@@ -42,6 +42,7 @@ from sklearn.preprocessing import StandardScaler
 
 # Import our components
 from .calibration import ModelCalibrator
+from src.models.calibration.tree_calibration import XGBoostCalibrator
 from .threshold import ThresholdOptimizer
 from .metrics import TradingMetrics
 from .utils import get_logger, calculate_scale_pos_weight, check_constant_predictions
@@ -519,11 +520,12 @@ class EnhancedXGBoostOptuna:
         # Create and train final model
         self.best_model = XGBClassifier(**params)
         
+        # Set early stopping rounds as attribute
+        self.best_model.early_stopping_rounds = early_stopping_rounds
+        
         self.best_model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            eval_metric=self.config.eval_metric,
-            early_stopping_rounds=early_stopping_rounds,
             verbose=self.config.verbose
         )
         

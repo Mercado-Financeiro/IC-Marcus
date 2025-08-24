@@ -1,182 +1,192 @@
 version: '3.8'
 
 services:
-  # Dashboard service
-  dashboard:
-    build:
-      context: .
-      target: dashboard
-    container_name: ml-trading-dashboard
-    ports:
-      - "8501:8501"
-    volumes:
-      - ./data:/app/data:ro
-      - ./artifacts:/app/artifacts:ro
-      - ./configs:/app/configs:ro
-    env_file:
-      - .env
-    restart: unless-stopped
-    networks:
-      - trading-network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
   # MLflow tracking server
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.9.2
-    container_name: ml-trading-mlflow
+    image: python:3.11-slim
+    container_name: mlflow-server
+    command: >
+      sh -c "pip install mlflow boto3 psycopg2-binary &&
+             mlflow server --backend-store-uri sqlite:///mlflow.db
+                          --default-artifact-root /mlflow-artifacts
+                          --host 0.0.0.0
+                          --port 5000"
     ports:
       - "5000:5000"
     volumes:
-      - ./artifacts/mlruns:/mlflow/mlruns
-      - ./artifacts/mlflow-artifacts:/mlflow/artifacts
+      - mlflow-data:/mlflow-artifacts
+      - mlflow-db:/mlflow.db
     environment:
-      - MLFLOW_BACKEND_STORE_URI=file:///mlflow/mlruns
-      - MLFLOW_ARTIFACTS_LOCATION=/mlflow/artifacts
-    command: >
-      mlflow server
-      --backend-store-uri file:///mlflow/mlruns
-      --default-artifact-root file:///mlflow/artifacts
-      --host 0.0.0.0
-      --port 5000
+      - MLFLOW_TRACKING_URI=http://0.0.0.0:5000
     networks:
-      - trading-network
-    restart: unless-stopped
+      - ml-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
-  # Paper trading service
-  paper-trader:
+  # Streamlit dashboard
+  dashboard:
     build:
       context: .
-      target: trader
-    container_name: ml-trading-paper-trader
+      dockerfile: ./deployment/Dockerfile
+    container_name: ml-dashboard
+    command: streamlit run src/dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
     volumes:
+      - ./src:/app/src:ro
+      - ./configs:/app/configs:ro
       - ./data:/app/data:ro
       - ./artifacts:/app/artifacts
-      - ./configs:/app/configs:ro
-      - ./logs:/app/logs
-    env_file:
-      - .env
-    environment:
-      - TRADING_MODE=paper
-    networks:
-      - trading-network
-    restart: unless-stopped
-    depends_on:
-      - mlflow
-
-  # Training service (run on demand)
-  training:
-    build:
-      context: .
-      target: training
-    container_name: ml-trading-training
-    volumes:
-      - ./data:/app/data
-      - ./artifacts:/app/artifacts
-      - ./configs:/app/configs
-      - ./logs:/app/logs
-    env_file:
-      - .env
     environment:
       - MLFLOW_TRACKING_URI=http://mlflow:5000
-    networks:
-      - trading-network
-    profiles:
-      - training
+      - PYTHONPATH=/app
+      - STREAMLIT_SERVER_ENABLE_CORS=false
+      - STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=false
     depends_on:
       - mlflow
+    networks:
+      - ml-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
-  # API service (optional)
+  # API server for model serving
   api:
     build:
       context: .
-      target: api
-    container_name: ml-trading-api
+      dockerfile: ./deployment/Dockerfile
+    container_name: ml-api
+    command: python -m src.api.server
     ports:
       - "8000:8000"
     volumes:
-      - ./artifacts/models:/app/artifacts/models:ro
+      - ./src:/app/src:ro
       - ./configs:/app/configs:ro
-    env_file:
-      - .env
+      - ./artifacts/models:/app/artifacts/models:ro
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - PYTHONPATH=/app
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - LOG_LEVEL=INFO
+    depends_on:
+      - mlflow
     networks:
-      - trading-network
-    restart: unless-stopped
-    profiles:
-      - api
+      - ml-network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 40s
 
-  # Development environment
-  dev:
-    build:
-      context: .
-      target: development
-    container_name: ml-trading-dev
+  # Jupyter notebook server for development
+  jupyter:
+    image: jupyter/scipy-notebook:python-3.11
+    container_name: ml-jupyter
     ports:
-      - "8888:8888"  # Jupyter
-      - "8502:8501"  # Streamlit (dev)
+      - "8888:8888"
     volumes:
-      - .:/app
-    env_file:
-      - .env
+      - ./notebooks:/home/jovyan/notebooks
+      - ./src:/home/jovyan/src:ro
+      - ./data:/home/jovyan/data
+      - ./artifacts:/home/jovyan/artifacts
     environment:
       - JUPYTER_ENABLE_LAB=yes
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - PYTHONPATH=/home/jovyan
     networks:
-      - trading-network
-    profiles:
-      - dev
-    stdin_open: true
-    tty: true
+      - ml-network
+    command: start-notebook.sh --NotebookApp.token='' --NotebookApp.password=''
 
-  # Redis cache (optional)
-  redis:
-    image: redis:7-alpine
-    container_name: ml-trading-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    command: redis-server --appendonly yes
-    networks:
-      - trading-network
-    restart: unless-stopped
-    profiles:
-      - cache
-
-  # PostgreSQL database (optional, for production)
+  # PostgreSQL database for production MLflow backend (optional)
   postgres:
     image: postgres:15-alpine
-    container_name: ml-trading-postgres
+    container_name: mlflow-postgres
+    environment:
+      - POSTGRES_DB=mlflow
+      - POSTGRES_USER=mlflow
+      - POSTGRES_PASSWORD=mlflow_password
     ports:
       - "5432:5432"
-    environment:
-      - POSTGRES_USER=trader
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
-      - POSTGRES_DB=trading_db
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
-      - trading-network
-    restart: unless-stopped
-    profiles:
-      - database
+      - ml-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U trader"]
+      test: ["CMD-SHELL", "pg_isready -U mlflow"]
       interval: 10s
       timeout: 5s
       retries: 5
 
+  # Redis for caching (optional)
+  redis:
+    image: redis:7-alpine
+    container_name: ml-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - ml-network
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Prometheus for metrics collection (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ml-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deployment/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - ml-network
+    depends_on:
+      - api
+      - mlflow
+
+  # Grafana for visualization (optional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ml-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deployment/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./deployment/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=admin
+    networks:
+      - ml-network
+    depends_on:
+      - prometheus
+
 networks:
-  trading-network:
+  ml-network:
     driver: bridge
 
 volumes:
-  redis-data:
+  mlflow-data:
+  mlflow-db:
   postgres-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:

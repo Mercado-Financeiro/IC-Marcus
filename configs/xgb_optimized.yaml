@@ -1,0 +1,152 @@
+# XGBoost Optimized Configuration
+# Based on empirical testing for crypto trading signals
+
+# Core settings
+seed: 42
+n_jobs: -1
+
+# Model parameters - optimized for less overfitting
+model_params:
+  # Tree complexity - reduced for better generalization
+  max_depth: 4  # Reduced from 6 to prevent overfitting
+  min_child_weight: 5  # Increased from 1 for more conservative splits
+  
+  # Learning rate - slower for stability
+  learning_rate: 0.05  # Reduced from 0.3
+  n_estimators: 300  # Increased to compensate for lower learning rate
+  
+  # Sampling - prevent overfitting
+  subsample: 0.7  # Reduced from 0.8
+  colsample_bytree: 0.7  # Reduced from 0.8
+  colsample_bylevel: 0.6  # NEW: Additional column sampling per level
+  colsample_bynode: 0.8  # NEW: Column sampling per node
+  
+  # Regularization - increased
+  gamma: 0.1  # Increased from 0 (min split loss)
+  reg_alpha: 0.1  # L1 regularization
+  reg_lambda: 1.0  # L2 regularization
+  
+  # Training parameters
+  objective: 'binary:logistic'
+  eval_metric: ['logloss', 'auc', 'aucpr']
+  tree_method: 'hist'  # Fast histogram method
+  device: 'cpu'  # CPU is fast enough with hist
+  
+  # Early stopping
+  early_stopping_rounds: 50  # Increased from 10 for better convergence
+  
+  # Class imbalance - calculated dynamically from data
+  scale_pos_weight: null  # Will be calculated as neg/pos ratio
+
+# Monotone constraints for logical features
+monotone_constraints:
+  # Example: RSI should be monotonically decreasing for buy signals
+  # rsi_14: -1
+  # volume_ratio: 1
+  enabled: false  # Enable when feature names are stable
+
+# Feature interaction constraints
+interaction_constraints:
+  enabled: false
+  # Group features that should interact
+  # Example: [[0,1,2], [3,4,5]]  # Price features, volume features
+
+# Training configuration
+training:
+  # Validation split
+  validation_size: 0.2
+  validation_type: 'temporal'  # Never random for time series
+  
+  # Cross-validation
+  cv_folds: 5
+  cv_type: 'purged_kfold'
+  embargo_pct: 0.02
+  purge_pct: 0.01
+
+# Feature configuration
+features:
+  # Feature selection
+  max_features: 80  # Reduced from 200+
+  selection_method: 'filter'  # Use our new filter pipeline
+  
+  # Feature filtering thresholds
+  variance_threshold: 0.01
+  correlation_threshold: 0.95
+  mutual_info_threshold: 0.001
+  
+  # Feature engineering
+  create_interactions: false  # Let XGBoost handle this
+  polynomial_features: false  # Not needed for tree models
+
+# Optimization settings for Optuna
+optimization:
+  # Hyperparameter search space
+  search_space:
+    max_depth: [3, 4, 5]  # Shallow trees
+    min_child_weight: [3, 5, 7]
+    learning_rate: [0.01, 0.05, 0.1]
+    subsample: [0.6, 0.7, 0.8]
+    colsample_bytree: [0.6, 0.7, 0.8]
+    colsample_bylevel: [0.5, 0.6, 0.7]
+    gamma: [0, 0.1, 0.2]
+    reg_alpha: [0, 0.01, 0.1]
+    reg_lambda: [0.5, 1.0, 2.0]
+  
+  # Optimization parameters
+  n_trials: 100
+  timeout: 3600  # 1 hour max
+  
+  # Objective
+  objective_metric: 'expected_value'  # Optimize for EV, not accuracy
+  
+  # Pruning
+  pruner: 'median'
+  n_startup_trials: 10
+  n_warmup_steps: 20
+
+# Threshold optimization
+threshold:
+  optimization_metric: 'expected_value'
+  n_thresholds: 100
+  
+  # Cost structure for EV calculation
+  costs:
+    tp: 0.005  # 0.5% profit on correct signal
+    fp: -0.003  # 0.3% loss on false signal
+    tn: 0.0  # No cost for correct no-trade
+    fn: -0.001  # 0.1% opportunity cost
+    fee_bps: 5  # 5 basis points fee
+    slippage_bps: 3  # 3 basis points slippage
+
+# Production settings
+production:
+  # Model versioning
+  save_best_only: true
+  model_registry: true
+  
+  # Performance monitoring
+  min_acceptable_ev: 0.001
+  max_acceptable_drawdown: 0.10
+  
+  # Retraining triggers
+  retrain_on_drift: true
+  drift_threshold: 0.1
+  retrain_frequency_days: 7
+  
+  # Safety checks
+  require_positive_ev: true
+  require_calibration: true
+  max_prediction_std: 0.3  # Flag high uncertainty predictions
+
+# Memory optimization
+memory:
+  use_float32: true
+  enable_gc: true
+  max_bin: 256  # For histogram method
+
+# Logging
+logging:
+  verbose: 1
+  log_feature_importance: true
+  log_training_curves: true
+  save_predictions: false  # Only for debugging
