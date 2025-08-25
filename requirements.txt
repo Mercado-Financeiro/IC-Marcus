@@ -26,7 +26,7 @@ shap>=0.46.0,<1.0.0
 pandera>=0.20.0,<1.0.0
 pydantic>=2.10.0,<3.0.0
 pydantic-settings>=2.6.0,<3.0.0
-great-expectations>=0.18.0,<1.0.0
+great-expectations>=0.18.0,<2.0.0
 
 # Backtesting & Portfolio
 vectorbt>=0.26.0,<1.0.0
