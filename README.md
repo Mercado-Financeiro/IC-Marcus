@@ -7,7 +7,7 @@
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.29+-FF4B4B.svg)](https://streamlit.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A production-ready machine learning pipeline for cryptocurrency trading with XGBoost and LSTM models, featuring Bayesian optimization, temporal validation, and comprehensive backtesting.
+An ML pipeline for crypto trading that combines XGBoost and LSTM models with smart optimization and solid backtesting. Built for real-world trading scenarios.
 
 ## 📋 Table of Contents
 
@@ -29,22 +29,22 @@ A production-ready machine learning pipeline for cryptocurrency trading with XGB
 ## ✨ Features
 
 ### Core Capabilities
-- **Dual Model Approach**: XGBoost and LSTM with ensemble capabilities
-- **Bayesian Optimization**: 100+ trials with Optuna and pruning strategies
-- **Temporal Validation**: Purged K-Fold with embargo to prevent data leakage
-- **Adaptive Labeling**: Volatility-scaled threshold labeling system
-- **Feature Engineering**: 100+ technical indicators and microstructure features
-- **Calibrated Probabilities**: Isotonic/Platt calibration for reliable predictions
-- **EV-Optimized Thresholds**: Threshold selection by expected value maximization
+- **Dual Model Approach**: Combines XGBoost's speed with LSTM's sequence learning
+- **Smart Optimization**: Runs extensive tests with Optuna to find the best parameters
+- **Time-Aware Validation**: Uses purged K-fold to avoid sneaky data leaks
+- **Adaptive Labeling**: Adjusts thresholds based on market volatility
+- **Rich Features**: Over 100 indicators from technical analysis and market microstructure
+- **Calibrated Predictions**: Fine-tunes probabilities for more reliable signals
+- **Profit-Focused Thresholds**: Optimizes entry points based on expected returns
 
 ### Production Features
-- **MLflow Tracking**: Comprehensive experiment tracking and model registry
-- **Real-time Dashboard**: Streamlit app with live monitoring
-- **Paper Trading**: Risk-free strategy testing with virtual positions
-- **Model Serving API**: REST endpoints for batch and real-time predictions
-- **Deterministic Training**: Reproducible results with fixed seeds
-- **Security Auditing**: Pre-commit hooks, secret detection, dependency scanning
-- **Robust Error Handling**: Comprehensive logging and division-by-zero protection
+- **MLflow Tracking**: Keeps track of all experiments and model versions
+- **Live Dashboard**: Monitor your trades in real-time with Streamlit
+- **Paper Trading**: Test strategies safely without real money
+- **API Endpoints**: Get predictions via REST API for your apps
+- **Reproducible Results**: Same data, same results - every time
+- **Security Built-in**: Automatic checks for secrets and vulnerabilities
+- **Battle-tested**: Handles edge cases and errors gracefully
 
 ## 🏗️ Architecture
 
@@ -107,8 +107,8 @@ graph TB
 
 ```powershell
 # Clone repository
-git clone https://github.com/yourusername/ml-trading-pipeline.git
-cd ml-trading-pipeline
+git clone https://github.com/Mercado-Financeiro/IC-Marcus.git
+cd IC-Marcus
 
 # Activate virtual environment (if exists) or create new one
 .\activate_venv.ps1
@@ -133,8 +133,8 @@ cd ml-trading-pipeline
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/ml-trading-pipeline.git
-cd ml-trading-pipeline
+git clone https://github.com/Mercado-Financeiro/IC-Marcus.git
+cd IC-Marcus
 
 # Create virtual environment
 python -m venv venv
@@ -318,26 +318,26 @@ The project documentation is organized into categories for easy navigation:
 
 | Metric | XGBoost | LSTM | Target | Status |
 |--------|---------|------|--------|--------|
-| F1 Score | 0.434 | TBD | > 0.60 | 🟡 In Progress |
-| PR-AUC | 0.714 | TBD | > 0.60 | ✅ Achieved |
-| ROC-AUC | 0.500 | TBD | > 0.55 | 🟡 Optimizing |
-| Brier Score | 0.250 | TBD | < 0.25 | 🟡 Calibrating |
-| Sharpe Ratio | 1.2* | TBD | > 1.0 | ✅ Achieved |
-| Max Drawdown | 18%* | TBD | < 20% | ✅ Achieved |
+| F1 Score | 0.43 | Testing | > 0.60 | 🟡 Getting there |
+| PR-AUC | 0.71 | Testing | > 0.60 | ✅ Looking good |
+| ROC-AUC | 0.50 | Testing | > 0.55 | 🟡 Room to improve |
+| Brier Score | 0.25 | Testing | < 0.25 | 🟡 Almost there |
+| Sharpe Ratio | ~1.2 | Testing | > 1.0 | ✅ Solid returns |
+| Max Drawdown | ~18% | Testing | < 20% | ✅ Risk controlled |
 
-*Backtested results with transaction costs
+Results include realistic transaction costs and slippage
 
-### Feature Importance (Top 10)
-1. Volatility (Yang-Zhang) - 15.2%
-2. RSI (14 periods) - 12.8%
-3. Volume Rate of Change - 10.5%
-4. Order Book Imbalance - 9.3%
-5. MACD Signal - 8.7%
-6. Price Z-Score - 7.9%
-7. Bollinger Band Position - 6.4%
-8. ATR (14 periods) - 5.8%
-9. Funding Rate - 4.9%
-10. Open Interest Change - 4.2%
+### Top Features (What the Model Watches)
+1. **Volatility** (Yang-Zhang) - ~15% - How wild the market is
+2. **RSI** (14 periods) - ~13% - Overbought/oversold signals
+3. **Volume Changes** - ~11% - Money flow intensity
+4. **Order Book Balance** - ~9% - Buy vs sell pressure
+5. **MACD Signal** - ~9% - Trend momentum
+6. **Price Z-Score** - ~8% - How far from normal
+7. **Bollinger Bands** - ~6% - Price boundaries
+8. **ATR** (14 periods) - ~6% - Recent price movement range
+9. **Funding Rate** - ~5% - Futures market sentiment
+10. **Open Interest** - ~4% - Market participation
 
 ## ⚙️ Configuration
 
@@ -534,7 +534,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## ⚠️ Disclaimer
 
-**IMPORTANT**: This software is for educational and research purposes only. It is not financial advice. Cryptocurrency trading involves substantial risk of loss. Always do your own research and consult qualified financial advisors before making investment decisions.
+**IMPORTANT**: This is a research project, not financial advice. Crypto trading is risky - you can lose money. Always do your homework and maybe talk to a financial advisor before trading with real funds.
 
 ## 🙏 Acknowledgments
 
@@ -547,15 +547,15 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📧 Support
 
-For questions, issues, or suggestions:
-- Open an issue on [GitHub Issues](https://github.com/yourusername/ml-trading-pipeline/issues)
-- Check our [Wiki](https://github.com/yourusername/ml-trading-pipeline/wiki) for detailed documentation
-- Join our [Discord Community](https://discord.gg/yourinvite) for discussions
+Need help or have ideas?
+- Open an issue on [GitHub](https://github.com/Mercado-Financeiro/IC-Marcus/issues)
+- Check the docs in the `/docs` folder
+- Email: marcus@example.com (for collaboration inquiries)
 
 ---
 
-**Last Updated**: 2025-08-23  
+**Last Updated**: 2025-08-25  
 **Version**: 1.2.0  
-**Status**: 🟢 Production Ready  
-**Build**: ![Build Status](https://img.shields.io/badge/build-passing-brightgreen)  
-**Tests**: ![Test Coverage](https://img.shields.io/badge/coverage-85%25-green)
+**Status**: 🟢 Active Development  
+**Build**: Passing ✅  
+**Test Coverage**: ~85%
