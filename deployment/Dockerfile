@@ -1,74 +1,103 @@
-# Multi-stage build for optimized production image
-FROM python:3.11-slim as builder
+# Multi-stage build for ML Trading Pipeline
+FROM python:3.11-slim AS base
 
-# Build arguments
-ARG MODEL_VERSION=latest
-ARG BUILD_DATE
-ARG VCS_REF
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    PYTHONHASHSEED=42 \
+    CUBLAS_WORKSPACE_CONFIG=:4096:8
 
-# Labels
-LABEL org.label-schema.build-date=$BUILD_DATE \
-      org.label-schema.vcs-ref=$VCS_REF \
-      org.label-schema.version=$MODEL_VERSION \
-      org.label-schema.name="crypto-ml" \
-      org.label-schema.description="Cryptocurrency ML Trading System"
-
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     gcc \
     g++ \
-    python3-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set working directory
-WORKDIR /app
-
-# Copy requirements first for better caching
-COPY requirements.txt .
-
-# Install Python dependencies
-RUN pip install --no-cache-dir --user -r requirements.txt
-
-# Production stage
-FROM python:3.11-slim
-
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    libgomp1 \
+    git \
     curl \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
-RUN useradd -m -u 1000 mluser && \
-    mkdir -p /app/artifacts /app/logs /app/data && \
-    chown -R mluser:mluser /app
+RUN useradd -m -s /bin/bash trader && \
+    mkdir -p /app/data /app/artifacts /app/logs && \
+    chown -R trader:trader /app
 
-# Copy Python packages from builder
-COPY --from=builder /root/.local /home/mluser/.local
-
-# Set working directory
 WORKDIR /app
 
+# Copy requirements first for better caching
+COPY --chown=trader:trader ../requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
 # Copy application code
-COPY --chown=mluser:mluser src/ ./src/
-COPY --chown=mluser:mluser configs/ ./configs/
-COPY --chown=mluser:mluser scripts/ ./scripts/
+COPY --chown=trader:trader . .
 
 # Switch to non-root user
-USER mluser
-
-# Add local bin to PATH
-ENV PATH=/home/mluser/.local/bin:$PATH
-
-# Environment variables for reproducibility
-ENV PYTHONHASHSEED=0 \
-    PYTHONUNBUFFERED=1 \
-    MLFLOW_TRACKING_URI=/app/artifacts/mlruns \
-    TZ=UTC
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import sys; sys.exit(0)" || exit 1
+USER trader
 
 # Default command (can be overridden)
-CMD ["python", "-m", "src.api.server"]
+CMD ["python", "-m", "src.dashboard.app_enhanced"]
+
+# Training stage
+FROM base AS training
+
+# Additional dependencies for training
+RUN pip install --no-cache-dir --user \
+    optuna-dashboard \
+    tensorboard
+
+CMD ["python", "run_optimization.py"]
+
+# API server stage
+FROM base AS api
+
+# Install API dependencies
+RUN pip install --no-cache-dir --user \
+    fastapi \
+    uvicorn[standard] \
+    python-multipart
+
+EXPOSE 8000
+
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Dashboard stage
+FROM base AS dashboard
+
+EXPOSE 8501
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8501/_stcore/health || exit 1
+
+CMD ["streamlit", "run", "src/dashboard/app_enhanced.py", \
+     "--server.port=8501", \
+     "--server.address=0.0.0.0", \
+     "--server.headless=true"]
+
+# Paper trading stage
+FROM base AS trader
+
+CMD ["python", "-m", "src.trading.paper_trader"]
+
+# Development stage
+FROM base AS development
+
+# Install development dependencies
+RUN pip install --no-cache-dir --user \
+    jupyter \
+    jupytext \
+    ipywidgets \
+    pytest \
+    pytest-cov \
+    black \
+    ruff \
+    mypy \
+    pre-commit
+
+EXPOSE 8888 8501
+
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser"]

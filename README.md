@@ -16,6 +16,7 @@ A production-ready machine learning pipeline for cryptocurrency trading with XGB
 - [Installation](#-installation)
 - [Quick Start](#-quick-start)
 - [Project Structure](#-project-structure)
+- [Documentation](#-documentation)
 - [Model Performance](#-model-performance)
 - [Configuration](#-configuration)
 - [Testing](#-testing)
@@ -245,7 +246,30 @@ make dashboard
 │   ├── blindagem/         # Protection tests (data leakage, etc)
 │   └── validation/        # Model validation tests
 ├── scripts/               # Utility scripts
-│   └── download_historical_data.py # Data download automation
+│   ├── optimization/     # Optimization scripts
+│   │   ├── execute_full_optimization.py
+│   │   └── run_optimization.py
+│   ├── fetch/           # Data fetching
+│   │   └── binance_klines.py
+│   └── validate/        # Validation scripts
+│       └── ge_checks.py
+├── docs/                # Documentation
+│   ├── architecture/    # System architecture docs
+│   │   ├── ARCHITECTURE.md
+│   │   ├── CODE_MAP.md
+│   │   └── AGENTS.md
+│   ├── guides/         # User guides
+│   │   ├── CI_CD_GUIDE.md
+│   │   └── LABELING_STRATEGY.md
+│   ├── optimizations/  # Optimization docs
+│   │   └── LSTM_OPTIMIZATIONS.md
+│   ├── project/        # Project docs
+│   │   ├── PRD.md
+│   │   ├── IMPLEMENTATION_SUMMARY.md
+│   │   └── AI_MEMORY.md
+│   └── issues/         # Issue tracking
+│       ├── ISSUES_FOUND.md
+│       └── CORREÇÕES_APLICADAS.md
 ├── notebooks/            # Jupyter notebooks
 ├── artifacts/           # Model artifacts and reports
 │   ├── models/         # Trained model files
@@ -262,6 +286,31 @@ make dashboard
 ├── requirements.txt  # Locked dependencies
 └── README.md         # This file
 ```
+
+## 📚 Documentation
+
+The project documentation is organized into categories for easy navigation:
+
+### Architecture & Design
+- [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) - System architecture overview
+- [`docs/architecture/CODE_MAP.md`](docs/architecture/CODE_MAP.md) - Code structure mapping
+- [`docs/architecture/AGENTS.md`](docs/architecture/AGENTS.md) - Agent-based components
+
+### Implementation Guides
+- [`docs/guides/CI_CD_GUIDE.md`](docs/guides/CI_CD_GUIDE.md) - CI/CD pipeline setup
+- [`docs/guides/LABELING_STRATEGY.md`](docs/guides/LABELING_STRATEGY.md) - Adaptive labeling system
+
+### Optimization Documentation
+- [`docs/optimizations/LSTM_OPTIMIZATIONS.md`](docs/optimizations/LSTM_OPTIMIZATIONS.md) - LSTM model optimizations
+
+### Project Documentation
+- [`docs/project/PRD.md`](docs/project/PRD.md) - Product Requirements Document
+- [`docs/project/IMPLEMENTATION_SUMMARY.md`](docs/project/IMPLEMENTATION_SUMMARY.md) - Implementation overview
+- [`docs/project/AI_MEMORY.md`](docs/project/AI_MEMORY.md) - AI assistant memory
+
+### Issue Tracking
+- [`docs/issues/ISSUES_FOUND.md`](docs/issues/ISSUES_FOUND.md) - Known issues
+- [`docs/issues/CORREÇÕES_APLICADAS.md`](docs/issues/CORREÇÕES_APLICADAS.md) - Applied fixes
 
 ## 📊 Model Performance
 
