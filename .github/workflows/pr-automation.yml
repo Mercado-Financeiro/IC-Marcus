@@ -1,0 +1,470 @@
+name: PR Automation & Comments
+
+# Automated PR interactions and Claude Code integration
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+  issue_comment:
+    types: [created, edited]
+  workflow_run:
+    workflows: ["CI Pipeline", "Smoke Backtest - Profit Pipeline"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  checks: write
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # Auto-comment on new PRs with helpful information
+  pr-welcome:
+    name: PR Welcome Comment
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.action == 'opened'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Generate welcome comment
+        run: |
+          python -c "
+          import os
+          from datetime import datetime
+          
+          # Get PR info from environment
+          pr_title = os.environ.get('GITHUB_PR_TITLE', 'N/A')
+          pr_author = os.environ.get('GITHUB_ACTOR', 'N/A')
+          
+          comment = []
+          comment.append('## Welcome to the ML Finance Crypto Pipeline! 🚀')
+          comment.append('')
+          comment.append(f'Thanks for your contribution, @{pr_author}!')
+          comment.append('')
+          comment.append('### Automated Checks')
+          comment.append('Your PR will be automatically validated with:')
+          comment.append('- 🗚️ **Code Quality**: Linting, formatting, and type checking')
+          comment.append('- 🔒 **Security**: Dependency scanning and secret detection')
+          comment.append('- 🧪 **Tests**: Unit tests and integration tests')
+          comment.append('- 🔬 **Smoke Tests**: Quick pipeline validation for model changes')
+          comment.append('')
+          comment.append('### Claude Code Integration')
+          comment.append('You can interact with Claude by mentioning `@claude` in comments:')
+          comment.append('- `@claude review this PR` - Get AI code review')
+          comment.append('- `@claude explain the changes` - Get explanation of changes')
+          comment.append('- `@claude suggest improvements` - Get optimization suggestions')
+          comment.append('')
+          comment.append('### Performance Testing')
+          comment.append('If your changes affect models or backtesting:')
+          comment.append('- Smoke tests will run automatically')
+          comment.append('- Check the **Smoke Test Results** comment below')
+          comment.append('- Full training can be triggered manually if needed')
+          comment.append('')
+          comment.append('### Getting Help')
+          comment.append('- Review the [Architecture Guide](docs/architecture/ARCHITECTURE.md)')
+          comment.append('- Check the [Implementation Summary](docs/project/IMPLEMENTATION_SUMMARY.md)')
+          comment.append('- Ask questions in PR comments')
+          comment.append('')
+          comment.append('---')
+          comment.append('_This comment is automatically generated. The CI pipeline will update this PR with test results._')
+          
+          # Save comment content
+          with open('welcome_comment.md', 'w') as f:
+              f.write('\\n'.join(comment))
+          
+          print('Welcome comment generated')
+          "
+        env:
+          GITHUB_PR_TITLE: ${{ github.event.pull_request.title }}
+      
+      - name: Post welcome comment
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const comment = fs.readFileSync('welcome_comment.md', 'utf8');
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+
+  # Claude Code Action integration
+  claude-integration:
+    name: Claude Code Action
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'issue_comment' && 
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@claude')
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      
+      - name: Parse Claude command
+        id: parse
+        run: |
+          COMMENT="${{ github.event.comment.body }}"
+          echo "comment=$COMMENT" >> $GITHUB_OUTPUT
+          
+          # Extract Claude command
+          if [[ "$COMMENT" == *"@claude review"* ]]; then
+            echo "action=review" >> $GITHUB_OUTPUT
+          elif [[ "$COMMENT" == *"@claude explain"* ]]; then
+            echo "action=explain" >> $GITHUB_OUTPUT
+          elif [[ "$COMMENT" == *"@claude suggest"* ]]; then
+            echo "action=suggest" >> $GITHUB_OUTPUT
+          elif [[ "$COMMENT" == *"@claude optimize"* ]]; then
+            echo "action=optimize" >> $GITHUB_OUTPUT
+          else
+            echo "action=general" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Get PR diff
+        id: diff
+        run: |
+          # Get the PR number from the issue
+          PR_NUMBER=${{ github.event.issue.number }}
+          
+          # Fetch PR information
+          gh pr view $PR_NUMBER --json files > pr_files.json
+          
+          # Get changed files
+          CHANGED_FILES=$(gh pr diff $PR_NUMBER --name-only | head -20)
+          echo "changed_files<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Set up Python for analysis
+        if: steps.parse.outputs.action == 'review' || steps.parse.outputs.action == 'optimize'
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Install analysis dependencies
+        if: steps.parse.outputs.action == 'review' || steps.parse.outputs.action == 'optimize'
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff bandit radon
+      
+      - name: Analyze code quality
+        if: steps.parse.outputs.action == 'review' || steps.parse.outputs.action == 'optimize'
+        run: |
+          # Run analysis on changed files
+          echo "${{ steps.diff.outputs.changed_files }}" > changed_files.txt
+          
+          # Only analyze Python files
+          grep '\.py$' changed_files.txt > python_files.txt || echo "No Python files changed"
+          
+          if [ -s python_files.txt ]; then
+            echo "Analyzing Python files:" 
+            cat python_files.txt
+            
+            # Run Ruff analysis
+            ruff check $(cat python_files.txt) --output-format=json > ruff_results.json || true
+            
+            # Run complexity analysis
+            radon cc $(cat python_files.txt) --json > complexity_results.json || true
+            
+            # Run security analysis
+            bandit $(cat python_files.txt) --format json -o security_results.json || true
+          else
+            echo "No Python files to analyze"
+            echo '[]' > ruff_results.json
+            echo '{}' > complexity_results.json
+            echo '{}' > security_results.json
+          fi
+      
+      - name: Generate Claude response
+        run: |
+          python -c "
+          import json
+          import os
+          from datetime import datetime
+          
+          action = '${{ steps.parse.outputs.action }}'
+          comment_body = '''${{ steps.parse.outputs.comment }}'''
+          changed_files = '''${{ steps.diff.outputs.changed_files }}'''.strip().split('\\n')
+          changed_files = [f for f in changed_files if f.strip()]
+          
+          response = []
+          response.append('## 🤖 Claude Code Assistant Response')
+          response.append('')
+          response.append(f'**Request:** {action.title()}')
+          response.append(f'**Time:** {datetime.now().strftime(\"%Y-%m-%d %H:%M:%S UTC\")}')
+          response.append('')
+          
+          if action == 'review':
+              response.append('### Code Review Results')
+              
+              # Load analysis results if available
+              try:
+                  with open('ruff_results.json') as f:
+                      ruff_issues = json.load(f)
+                  
+                  if ruff_issues:
+                      response.append('')
+                      response.append('🔍 **Linting Issues Found:**')
+                      for issue in ruff_issues[:5]:  # Limit to 5 issues
+                          file_path = issue.get('filename', 'unknown')
+                          line = issue.get('location', {}).get('row', '?')
+                          code = issue.get('code', '?')
+                          message = issue.get('message', 'No message')
+                          response.append(f'- `{file_path}:{line}` [{code}] {message}')
+                      if len(ruff_issues) > 5:
+                          response.append(f'- ... and {len(ruff_issues) - 5} more issues')
+                  else:
+                      response.append('✅ **No linting issues found**')
+              except:
+                  response.append('⚠ Could not analyze code quality')
+              
+              # Check complexity
+              try:
+                  with open('complexity_results.json') as f:
+                      complexity = json.load(f)
+                  
+                  high_complexity = []
+                  for file_path, data in complexity.items():
+                      for item in data:
+                          if item.get('complexity', 0) > 10:
+                              high_complexity.append((file_path, item['name'], item['complexity']))
+                  
+                  if high_complexity:
+                      response.append('')
+                      response.append('🌀 **High Complexity Functions:**')
+                      for file_path, func_name, comp in high_complexity[:3]:
+                          response.append(f'- `{func_name}` in `{file_path}`: {comp}')
+                  else:
+                      response.append('')
+                      response.append('✅ **Code complexity looks good**')
+              except:
+                  pass
+          
+          elif action == 'explain':
+              response.append('### Code Changes Explanation')
+              response.append('')
+              if changed_files:
+                  response.append(f'This PR modifies {len(changed_files)} files:')
+                  for f in changed_files[:10]:
+                      if f.startswith('src/models/'):
+                          response.append(f'- 🤖 `{f}` - Model implementation changes')
+                      elif f.startswith('src/features/'):
+                          response.append(f'- 📊 `{f}` - Feature engineering updates')
+                      elif f.startswith('src/backtest/'):
+                          response.append(f'- 🗺 `{f}` - Backtesting logic changes')
+                      elif f.startswith('tests/'):
+                          response.append(f'- 🧪 `{f}` - Test updates')
+                      elif f.startswith('scripts/'):
+                          response.append(f'- 📜 `{f}` - Script modifications')
+                      else:
+                          response.append(f'- 📄 `{f}`')
+                  
+                  if len(changed_files) > 10:
+                      response.append(f'- ... and {len(changed_files) - 10} more files')
+              else:
+                  response.append('No file changes detected in this analysis.')
+          
+          elif action == 'suggest':
+              response.append('### Improvement Suggestions')
+              response.append('')
+              response.append('💡 **General Recommendations:**')
+              response.append('- Ensure all new code has appropriate unit tests')
+              response.append('- Add docstrings for new functions and classes')
+              response.append('- Consider adding type hints for better maintainability')
+              response.append('- Run the smoke tests before requesting review')
+              response.append('')
+              response.append('🔍 **ML-Specific Suggestions:**')
+              response.append('- Validate model outputs with proper metrics')
+              response.append('- Ensure deterministic behavior with proper seeding')
+              response.append('- Consider memory efficiency for large datasets')
+              response.append('- Add logging for model training progress')
+          
+          elif action == 'optimize':
+              response.append('### Optimization Recommendations')
+              response.append('')
+              response.append('🚀 **Performance Optimizations:**')
+              if any('lstm' in f.lower() for f in changed_files):
+                  response.append('- Consider batch processing for LSTM training')
+                  response.append('- Use gradient accumulation for memory efficiency')
+                  response.append('- Implement early stopping to prevent overfitting')
+              if any('xgb' in f.lower() for f in changed_files):
+                  response.append('- Use histogram-based tree method for speed')
+                  response.append('- Consider feature selection to reduce dimensionality')
+                  response.append('- Optimize number of trees vs. learning rate')
+              response.append('')
+              response.append('📊 **Data Processing Optimizations:**')
+              response.append('- Use vectorized operations where possible')
+              response.append('- Consider caching expensive computations')
+              response.append('- Profile memory usage for large datasets')
+          
+          else:
+              response.append('### General Assistance')
+              response.append('')
+              response.append('I can help you with:')
+              response.append('- `@claude review` - Code quality analysis')
+              response.append('- `@claude explain` - Understanding changes')
+              response.append('- `@claude suggest` - Improvement recommendations')
+              response.append('- `@claude optimize` - Performance suggestions')
+          
+          response.append('')
+          response.append('### Next Steps')
+          response.append('- Review the CI pipeline results above')
+          response.append('- Check smoke test outcomes for model changes')
+          response.append('- Address any failing tests or quality issues')
+          response.append('- Request human review when ready')
+          
+          response.append('')
+          response.append('---')
+          response.append('_This is an automated response from Claude Code Assistant. For complex issues, consider consulting the development team._')
+          
+          # Save response
+          with open('claude_response.md', 'w') as f:
+              f.write('\\n'.join(response))
+          
+          print('Claude response generated')
+          "
+      
+      - name: Post Claude response
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const response = fs.readFileSync('claude_response.md', 'utf8');
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: response
+            });
+
+  # CI Results aggregation and reporting
+  ci-results-comment:
+    name: CI Results Summary
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_run' && 
+      github.event.workflow_run.conclusion != 'cancelled' &&
+      github.event.workflow_run.event == 'pull_request'
+    
+    steps:
+      - name: Get PR number
+        id: pr
+        run: |
+          # Get PR number from the workflow run
+          PR_NUMBER=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }} \
+            --jq '.pull_requests[0].number')
+          echo "number=$PR_NUMBER" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Generate CI summary
+        if: steps.pr.outputs.number != 'null'
+        run: |
+          python -c "
+          import os
+          from datetime import datetime
+          
+          workflow_name = '${{ github.event.workflow_run.name }}'
+          conclusion = '${{ github.event.workflow_run.conclusion }}'
+          run_url = '${{ github.event.workflow_run.html_url }}'
+          
+          # Generate status emoji
+          if conclusion == 'success':
+              status_emoji = '✅'
+              status_text = 'All checks passed'
+          elif conclusion == 'failure':
+              status_emoji = '❌'
+              status_text = 'Some checks failed'
+          elif conclusion == 'cancelled':
+              status_emoji = '⛔'
+              status_text = 'Checks cancelled'
+          else:
+              status_emoji = '🔄'
+              status_text = 'In progress'
+          
+          comment = []
+          comment.append(f'## {status_emoji} {workflow_name} Results')
+          comment.append('')
+          comment.append(f'**Status:** {status_text}')
+          comment.append(f'**Time:** {datetime.now().strftime(\"%Y-%m-%d %H:%M:%S UTC\")}')
+          comment.append(f'**Details:** [View workflow run]({run_url})')
+          comment.append('')
+          
+          if conclusion == 'success':
+              comment.append('### ✅ Success!')
+              if 'CI Pipeline' in workflow_name:
+                  comment.append('All quality checks, tests, and validations passed.')
+              elif 'Smoke Backtest' in workflow_name:
+                  comment.append('Profit pipeline validation completed successfully.')
+          else:
+              comment.append('### ❌ Action Required')
+              comment.append('Please check the workflow logs and address any issues.')
+              comment.append('')
+              comment.append('**Common fixes:**')
+              comment.append('- Fix linting issues: `ruff check src tests --fix`')
+              comment.append('- Format code: `black src tests`')
+              comment.append('- Update tests for any breaking changes')
+              comment.append('- Check model integration tests')
+          
+          comment.append('')
+          comment.append('---')
+          comment.append('_Automatically updated by CI pipeline_')
+          
+          # Save comment
+          with open('ci_comment.md', 'w') as f:
+              f.write('\\n'.join(comment))
+          
+          print(f'CI summary generated for {workflow_name}: {conclusion}')
+          "
+      
+      - name: Update or create CI comment
+        if: steps.pr.outputs.number != 'null'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const comment = fs.readFileSync('ci_comment.md', 'utf8');
+            const prNumber = '${{ steps.pr.outputs.number }}';
+            const workflowName = '${{ github.event.workflow_run.name }}';
+            
+            // Get existing comments
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: parseInt(prNumber),
+            });
+            
+            // Look for existing CI comment for this workflow
+            const existingComment = comments.data.find(
+              c => c.user.login === 'github-actions[bot]' && 
+                   c.body.includes(workflowName + ' Results')
+            );
+            
+            if (existingComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: comment
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: parseInt(prNumber),
+                body: comment
+              });
+            }

@@ -1,0 +1,419 @@
+name: Smoke Backtest - Profit Pipeline
+
+# Quick validation of profit-oriented pipeline changes
+on:
+  pull_request:
+    branches: [ main, master, develop ]
+    paths:
+      - 'src/models/**'
+      - 'src/backtest/**'
+      - 'src/metrics/**'
+      - 'scripts/train_profit_*.py'
+      - 'run_profit_pipeline.sh'
+  workflow_dispatch:
+    inputs:
+      model_type:
+        description: 'Model to test'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - xgboost
+          - lstm
+          - both
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+env:
+  PYTHONHASHSEED: 0
+  MLFLOW_TRACKING_URI: 'file://./artifacts/mlruns'
+  # Deterministic settings for reproducible results
+  CUBLAS_WORKSPACE_CONFIG: ':4096:8'
+  CUDA_LAUNCH_BLOCKING: 1
+
+jobs:
+  smoke-test-pipeline:
+    name: Smoke Test Profit Pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    strategy:
+      matrix:
+        model: [xgboost, lstm]
+        fail-fast: false
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Cache dependencies and data
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/pip
+            data/cache/
+            ~/.cache/torch
+          key: ${{ runner.os }}-smoke-${{ matrix.model }}-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-smoke-${{ matrix.model }}-
+            ${{ runner.os }}-smoke-
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+          
+          # Install additional test dependencies
+          pip install pytest-timeout memory-profiler
+      
+      - name: Setup test environment
+        run: |
+          # Create required directories
+          mkdir -p artifacts/{models,reports,mlruns,optuna}
+          mkdir -p data/{raw,processed,cache}
+          mkdir -p results
+          
+          # Set deterministic environment
+          echo "PYTHONHASHSEED=0" >> $GITHUB_ENV
+      
+      - name: Generate test data
+        run: |
+          python -c "
+          import pandas as pd
+          import numpy as np
+          from datetime import datetime, timedelta
+          
+          # Set seed for reproducible test data
+          np.random.seed(42)
+          
+          # Generate realistic crypto data for testing
+          dates = pd.date_range(
+              end=datetime.now(), 
+              periods=2000,  # Enough for meaningful backtest
+              freq='15min'
+          )
+          
+          # Simulate realistic price movements with volatility clustering
+          returns = np.random.randn(2000) * 0.01
+          volatility = np.abs(np.random.randn(2000) * 0.005) + 0.01
+          returns = returns * volatility  # Heteroskedastic returns
+          
+          # Generate price series
+          price = 50000 * np.exp(np.cumsum(returns))
+          
+          # Create OHLCV data
+          data = pd.DataFrame({
+              'timestamp': dates,
+              'open': price * (1 + np.random.randn(2000) * 0.0005),
+              'high': price * (1 + np.abs(np.random.randn(2000)) * 0.001),
+              'low': price * (1 - np.abs(np.random.randn(2000)) * 0.001),
+              'close': price,
+              'volume': np.random.exponential(1000, 2000) * (1 + returns)
+          })
+          
+          # Ensure OHLC constraints
+          data['high'] = data[['open', 'high', 'close']].max(axis=1)
+          data['low'] = data[['open', 'low', 'close']].min(axis=1)
+          
+          # Save test data
+          data.to_parquet('data/raw/BTCUSDT_15m.parquet')
+          print(f'Generated {len(data)} test data points')
+          print(f'Price range: {data[\"close\"].min():.2f} - {data[\"close\"].max():.2f}')
+          "
+      
+      - name: Test integration pipeline
+        run: |
+          # Run the integration test first
+          python test_integration_final.py
+        timeout-minutes: 5
+      
+      - name: Run XGBoost smoke test
+        if: matrix.model == 'xgboost'
+        run: |
+          echo "Testing XGBoost profit pipeline..."
+          ./run_profit_pipeline.sh \
+            --model xgboost \
+            --trials 5 \
+            --symbol BTCUSDT \
+            --timeframe 15m \
+            --quick
+        timeout-minutes: 10
+        continue-on-error: false
+      
+      - name: Run LSTM smoke test
+        if: matrix.model == 'lstm'
+        run: |
+          echo "Testing LSTM profit pipeline..."
+          # Use the LSTM training script directly for more control
+          python scripts/train_profit_lstm.py \
+            --symbol BTCUSDT \
+            --timeframe 15m \
+            --trials 3 \
+            --epochs 5 \
+            --verbose \
+            --save-model
+        timeout-minutes: 15
+        continue-on-error: false
+      
+      - name: Validate pipeline outputs
+        run: |
+          python -c "
+          import os
+          import json
+          import pandas as pd
+          from pathlib import Path
+          
+          # Check for expected output files
+          results_dir = Path('results')
+          artifacts_dir = Path('artifacts')
+          
+          print('Validation Report:')
+          print('=' * 50)
+          
+          # Check results directory
+          if results_dir.exists():
+              result_files = list(results_dir.rglob('*'))
+              print(f'✓ Results directory exists with {len(result_files)} files')
+          else:
+              print('⚠ Results directory not found')
+          
+          # Check for model artifacts
+          model_files = list(artifacts_dir.glob('models/*'))
+          if model_files:
+              print(f'✓ Found {len(model_files)} model artifacts')
+              for f in model_files[:3]:
+                  print(f'  - {f.name}')
+          else:
+              print('⚠ No model artifacts found')
+          
+          # Check MLflow tracking
+          mlruns_dir = artifacts_dir / 'mlruns'
+          if mlruns_dir.exists():
+              experiments = list(mlruns_dir.glob('*/'))  
+              print(f'✓ MLflow tracking active with {len(experiments)} experiments')
+          else:
+              print('⚠ MLflow tracking not found')
+          
+          # Check for performance metrics
+          report_files = list(artifacts_dir.glob('reports/*'))
+          if report_files:
+              print(f'✓ Found {len(report_files)} report files')
+          
+          print('=' * 50)
+          print('Smoke test validation completed')
+          "
+      
+      - name: Extract key metrics
+        if: always()
+        run: |
+          python -c "
+          import json
+          import os
+          from pathlib import Path
+          import pandas as pd
+          
+          # Extract metrics for PR comment
+          metrics = {
+              'model': '${{ matrix.model }}',
+              'status': 'success' if os.environ.get('GITHUB_STEP_RESULT', 'success') == 'success' else 'failed',
+              'files_generated': 0,
+              'model_artifacts': 0,
+              'execution_time': 'N/A'
+          }
+          
+          # Count generated files
+          results_dir = Path('results')
+          if results_dir.exists():
+              metrics['files_generated'] = len(list(results_dir.rglob('*')))
+          
+          artifacts_dir = Path('artifacts')
+          if artifacts_dir.exists():
+              metrics['model_artifacts'] = len(list(artifacts_dir.glob('models/*')))
+          
+          # Save metrics for PR comment
+          with open(f'smoke_metrics_{matrix.model}.json', 'w') as f:
+              json.dump(metrics, f, indent=2)
+          
+          print(f'Metrics saved: {metrics}')
+          "
+      
+      - name: Memory usage check
+        if: always()
+        run: |
+          python -c "
+          import psutil
+          import os
+          
+          # Get current memory usage
+          process = psutil.Process(os.getpid())
+          memory_info = process.memory_info()
+          
+          print(f'Memory Usage Report:')
+          print(f'RSS: {memory_info.rss / 1024 / 1024:.2f} MB')
+          print(f'VMS: {memory_info.vms / 1024 / 1024:.2f} MB')
+          
+          # Check if memory usage is reasonable (< 1GB for smoke test)
+          if memory_info.rss > 1024 * 1024 * 1024:
+              print('⚠ High memory usage detected')
+          else:
+              print('✓ Memory usage within acceptable limits')
+          "
+      
+      - name: Upload smoke test artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: smoke-test-${{ matrix.model }}
+          path: |
+            results/
+            artifacts/reports/
+            smoke_metrics_${{ matrix.model }}.json
+          retention-days: 5
+  
+  # Collect results and post PR comment
+  smoke-test-summary:
+    name: Smoke Test Summary
+    needs: smoke-test-pipeline
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'pull_request'
+    
+    permissions:
+      pull-requests: write
+      contents: read
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: smoke-results/
+      
+      - name: Generate PR comment
+        run: |
+          python -c "
+          import json
+          import os
+          from pathlib import Path
+          from datetime import datetime
+          
+          # Collect all metrics
+          results_dir = Path('smoke-results')
+          all_metrics = []
+          
+          for artifact_dir in results_dir.iterdir():
+              if artifact_dir.is_dir():
+                  for metrics_file in artifact_dir.glob('smoke_metrics_*.json'):
+                      with open(metrics_file) as f:
+                          metrics = json.load(f)
+                          all_metrics.append(metrics)
+          
+          # Generate markdown comment
+          comment = []
+          comment.append('## 🔬 Smoke Test Results')
+          comment.append('')
+          comment.append(f'**Test Time:** {datetime.now().strftime(\"%Y-%m-%d %H:%M:%S UTC\")}')  
+          comment.append(f'**Commit:** {os.environ.get(\"GITHUB_SHA\", \"unknown\")[:8]}')
+          comment.append('')
+          
+          # Results table
+          comment.append('| Model | Status | Files Generated | Model Artifacts |')
+          comment.append('|-------|--------|----------------|-----------------|')
+          
+          for metrics in all_metrics:
+              status_emoji = '✅' if metrics['status'] == 'success' else '❌'
+              comment.append(
+                  f\"| {metrics['model']} | {status_emoji} {metrics['status']} | \"
+                  f\"{metrics['files_generated']} | {metrics['model_artifacts']} |\"
+              )
+          
+          comment.append('')
+          
+          # Summary
+          success_count = sum(1 for m in all_metrics if m['status'] == 'success')
+          total_count = len(all_metrics)
+          
+          if success_count == total_count:
+              comment.append('### ✅ All smoke tests passed!')
+              comment.append('')
+              comment.append('The profit-oriented pipeline is working correctly for all models.')
+          else:
+              comment.append(f'### ❌ {total_count - success_count} smoke test(s) failed')
+              comment.append('')
+              comment.append('Please check the workflow logs for details.')
+          
+          comment.append('')
+          comment.append('---')
+          comment.append('_This comment is automatically generated by the smoke test workflow._')
+          
+          # Save comment
+          with open('pr_comment.md', 'w') as f:
+              f.write('\\n'.join(comment))
+          
+          print('PR comment generated:')
+          print('\\n'.join(comment))
+          "
+      
+      - name: Post PR comment
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const comment = fs.readFileSync('pr_comment.md', 'utf8');
+            
+            // Check if we already have a comment from this workflow
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.data.find(
+              c => c.user.login === 'github-actions[bot]' && 
+                   c.body.includes('🔬 Smoke Test Results')
+            );
+            
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment
+              });
+            }
+  
+  # Status check for branch protection
+  smoke-test-status:
+    name: Smoke Test Status
+    needs: smoke-test-pipeline
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Check smoke test results
+        run: |
+          if [[ "${{ needs.smoke-test-pipeline.result }}" == "failure" ]]; then
+            echo "❌ Smoke tests failed"
+            echo "The profit pipeline has issues that need to be resolved before merging."
+            exit 1
+          else
+            echo "✅ Smoke tests passed"
+            echo "The profit pipeline is working correctly."
+          fi

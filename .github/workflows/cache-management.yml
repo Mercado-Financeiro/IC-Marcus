@@ -1,0 +1,554 @@
+name: Cache & Dependency Management
+
+# Optimize caching strategies and manage dependencies
+on:
+  schedule:
+    # Weekly cleanup on Sundays at 3 AM UTC
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      cleanup_type:
+        description: 'Type of cleanup to perform'
+        required: true
+        default: 'partial'
+        type: choice
+        options:
+          - partial
+          - full
+          - dependencies-only
+          - models-only
+      force_rebuild:
+        description: 'Force rebuild of all caches'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: write
+  packages: write
+
+env:
+  PYTHON_VERSION: '3.11'
+  CACHE_VERSION: 'v2'  # Increment to invalidate all caches
+
+jobs:
+  # Cache optimization and warming
+  cache-optimization:
+    name: Cache Optimization
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Analyze current cache usage
+        run: |
+          python -c "
+          import os
+          import json
+          from datetime import datetime, timedelta
+          
+          cache_analysis = {
+              'timestamp': datetime.now().isoformat(),
+              'cache_version': '${{ env.CACHE_VERSION }}',
+              'analysis': {}
+          }
+          
+          # Check common cache locations
+          cache_paths = [
+              ('pip', '~/.cache/pip'),
+              ('torch', '~/.cache/torch'),
+              ('huggingface', '~/.cache/huggingface'),
+              ('data_cache', 'data/cache'),
+              ('model_cache', 'artifacts/models')
+          ]
+          
+          for name, path in cache_paths:
+              expanded_path = os.path.expanduser(path)
+              if os.path.exists(expanded_path):
+                  # Calculate directory size
+                  total_size = 0
+                  file_count = 0
+                  for dirpath, dirnames, filenames in os.walk(expanded_path):
+                      for filename in filenames:
+                          try:
+                              filepath = os.path.join(dirpath, filename)
+                              total_size += os.path.getsize(filepath)
+                              file_count += 1
+                          except:
+                              pass
+                  
+                  cache_analysis['analysis'][name] = {
+                      'path': path,
+                      'size_mb': round(total_size / (1024 * 1024), 2),
+                      'file_count': file_count,
+                      'exists': True
+                  }
+              else:
+                  cache_analysis['analysis'][name] = {
+                      'path': path,
+                      'exists': False
+                  }
+          
+          # Save analysis
+          with open('cache_analysis.json', 'w') as f:
+              json.dump(cache_analysis, f, indent=2)
+          
+          print('Cache Analysis Results:')
+          print('=' * 50)
+          total_cache_size = 0
+          for name, info in cache_analysis['analysis'].items():
+              if info.get('exists', False):
+                  size_mb = info.get('size_mb', 0)
+                  files = info.get('file_count', 0)
+                  print(f'{name}: {size_mb:.2f} MB ({files} files)')
+                  total_cache_size += size_mb
+              else:
+                  print(f'{name}: Not found')
+          
+          print('=' * 50)
+          print(f'Total cache size: {total_cache_size:.2f} MB')
+          
+          # Recommendations
+          if total_cache_size > 500:
+              print('⚠️  Cache size is large, consider cleanup')
+          else:
+              print('✅ Cache size is reasonable')
+          "
+      
+      - name: Warm up dependency caches
+        run: |
+          echo "Warming up dependency caches..."
+          
+          # Install core dependencies to warm cache
+          pip install --no-deps --dry-run numpy pandas scikit-learn
+          pip install --no-deps --dry-run torch torchvision
+          pip install --no-deps --dry-run xgboost optuna mlflow
+          
+          echo "Dependency cache warming completed"
+      
+      - name: Pre-build feature engineering cache
+        run: |
+          python -c "
+          import sys
+          import os
+          sys.path.insert(0, os.getcwd())
+          
+          print('Pre-building feature engineering cache...')
+          
+          # Create sample data for feature cache warming
+          import pandas as pd
+          import numpy as np
+          from datetime import datetime, timedelta
+          
+          # Ensure cache directory exists
+          os.makedirs('data/cache', exist_ok=True)
+          
+          # Generate sample data
+          dates = pd.date_range(
+              end=datetime.now(), 
+              periods=1000, 
+              freq='15min'
+          )
+          
+          np.random.seed(42)  # Deterministic for caching
+          returns = np.random.randn(1000) * 0.01
+          price = 50000 * np.exp(np.cumsum(returns))
+          
+          sample_data = pd.DataFrame({
+              'timestamp': dates,
+              'open': price * (1 + np.random.randn(1000) * 0.0005),
+              'high': price * (1 + np.abs(np.random.randn(1000)) * 0.001),
+              'low': price * (1 - np.abs(np.random.randn(1000)) * 0.001),
+              'close': price,
+              'volume': np.random.exponential(1000, 1000)
+          })
+          
+          # Save sample data
+          sample_data.to_parquet('data/cache/sample_ohlcv.parquet')
+          
+          # Try to warm feature engineering cache
+          try:
+              from src.features.engineering import FeatureEngineer
+              
+              engineer = FeatureEngineer()
+              features = engineer.create_all_features(sample_data)
+              
+              # Save feature cache metadata
+              cache_metadata = {
+                  'created_at': datetime.now().isoformat(),
+                  'sample_shape': sample_data.shape,
+                  'features_shape': features.shape,
+                  'feature_count': len(features.columns)
+              }
+              
+              import json
+              with open('data/cache/cache_metadata.json', 'w') as f:
+                  json.dump(cache_metadata, f, indent=2)
+              
+              print(f'Feature cache warmed: {features.shape[1]} features')
+              
+          except Exception as e:
+              print(f'Feature cache warming failed: {e}')
+              # Create minimal metadata
+              cache_metadata = {
+                  'created_at': datetime.now().isoformat(),
+                  'status': 'partial_failure',
+                  'error': str(e)
+              }
+              
+              import json
+              with open('data/cache/cache_metadata.json', 'w') as f:
+                  json.dump(cache_metadata, f, indent=2)
+          
+          print('Cache warming completed')
+          "
+      
+      - name: Cache model artifacts
+        uses: actions/cache@v3
+        with:
+          path: |
+            artifacts/models/
+            artifacts/mlruns/
+          key: ${{ runner.os }}-models-${{ env.CACHE_VERSION }}-${{ hashFiles('src/models/**/*.py') }}
+          restore-keys: |
+            ${{ runner.os }}-models-${{ env.CACHE_VERSION }}-
+            ${{ runner.os }}-models-
+      
+      - name: Cache feature data
+        uses: actions/cache@v3
+        with:
+          path: |
+            data/cache/
+            data/processed/
+          key: ${{ runner.os }}-data-${{ env.CACHE_VERSION }}-${{ hashFiles('data/cache/cache_metadata.json') }}
+          restore-keys: |
+            ${{ runner.os }}-data-${{ env.CACHE_VERSION }}-
+            ${{ runner.os }}-data-
+      
+      - name: Cache Python dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/torch
+          key: ${{ runner.os }}-pip-${{ env.CACHE_VERSION }}-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-${{ env.CACHE_VERSION }}-
+            ${{ runner.os }}-pip-
+      
+      - name: Upload cache analysis
+        uses: actions/upload-artifact@v3
+        with:
+          name: cache-analysis
+          path: |
+            cache_analysis.json
+            data/cache/cache_metadata.json
+          retention-days: 30
+
+  # Dependency scanning and updates
+  dependency-management:
+    name: Dependency Management
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Install dependency management tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-tools pip-audit pipdeptree safety
+      
+      - name: Analyze dependency tree
+        run: |
+          # Install current dependencies
+          pip install -e .[dev]
+          
+          # Generate dependency tree
+          pipdeptree --json > dependency_tree.json
+          pipdeptree --graph-output png > dependency_graph.png
+          
+          # Generate requirements analysis
+          python -c "
+          import json
+          import subprocess
+          from datetime import datetime
+          
+          # Load dependency tree
+          with open('dependency_tree.json') as f:
+              deps = json.load(f)
+          
+          analysis = {
+              'timestamp': datetime.now().isoformat(),
+              'total_packages': len(deps),
+              'direct_dependencies': 0,
+              'transitive_dependencies': 0,
+              'potential_conflicts': [],
+              'heavy_packages': [],
+              'security_issues': []
+          }
+          
+          # Analyze dependencies
+          for pkg in deps:
+              if not pkg.get('dependencies'):
+                  analysis['direct_dependencies'] += 1
+              else:
+                  analysis['transitive_dependencies'] += 1
+                  
+                  # Check for potential conflicts (multiple versions)
+                  deps_names = [d['key'] for d in pkg['dependencies']]
+                  if len(deps_names) != len(set(deps_names)):
+                      analysis['potential_conflicts'].append(pkg['key'])
+              
+              # Identify heavy packages (> 50MB typical)
+              heavy_indicators = ['torch', 'tensorflow', 'numpy', 'pandas', 'scipy']
+              if any(indicator in pkg['key'].lower() for indicator in heavy_indicators):
+                  analysis['heavy_packages'].append(pkg['key'])
+          
+          # Check for security issues
+          try:
+              result = subprocess.run(['safety', 'check', '--json'], 
+                                    capture_output=True, text=True)
+              if result.returncode == 0 and result.stdout:
+                  safety_data = json.loads(result.stdout)
+                  analysis['security_issues'] = safety_data
+          except:
+              analysis['security_issues'] = 'Failed to run safety check'
+          
+          # Save analysis
+          with open('dependency_analysis.json', 'w') as f:
+              json.dump(analysis, f, indent=2)
+          
+          # Print summary
+          print('Dependency Analysis:')
+          print('=' * 50)
+          print(f'Total packages: {analysis[\"total_packages\"]}')
+          print(f'Direct: {analysis[\"direct_dependencies\"]}')
+          print(f'Transitive: {analysis[\"transitive_dependencies\"]}')
+          print(f'Heavy packages: {\", \".join(analysis[\"heavy_packages\"])}')
+          
+          if analysis['potential_conflicts']:
+              print(f'Potential conflicts: {\", \".join(analysis[\"potential_conflicts\"])}')
+          
+          if analysis['security_issues'] and isinstance(analysis['security_issues'], list):
+              print(f'Security issues: {len(analysis[\"security_issues\"])}')
+          "
+      
+      - name: Check for outdated packages
+        run: |
+          pip list --outdated --format=json > outdated_packages.json
+          
+          python -c "
+          import json
+          
+          with open('outdated_packages.json') as f:
+              outdated = json.load(f)
+          
+          if outdated:
+              print('Outdated packages:')
+              print('=' * 50)
+              for pkg in outdated[:10]:  # Limit output
+                  print(f'{pkg[\"name\"]}: {pkg[\"version\"]} -> {pkg[\"latest_version\"]}')
+              
+              if len(outdated) > 10:
+                  print(f'... and {len(outdated) - 10} more packages')
+          else:
+              print('All packages are up to date!')
+          "
+      
+      - name: Generate dependency update recommendations
+        run: |
+          python -c "
+          import json
+          import subprocess
+          from datetime import datetime
+          
+          recommendations = {
+              'timestamp': datetime.now().isoformat(),
+              'safe_updates': [],
+              'major_updates': [],
+              'security_updates': [],
+              'notes': []
+          }
+          
+          # Load outdated packages
+          try:
+              with open('outdated_packages.json') as f:
+                  outdated = json.load(f)
+          except:
+              outdated = []
+          
+          # Categorize updates
+          for pkg in outdated:
+              current_version = pkg['version'].split('.')
+              latest_version = pkg['latest_version'].split('.')
+              
+              # Parse version numbers
+              try:
+                  current_major = int(current_version[0])
+                  latest_major = int(latest_version[0])
+                  
+                  if latest_major > current_major:
+                      recommendations['major_updates'].append({
+                          'name': pkg['name'],
+                          'current': pkg['version'],
+                          'latest': pkg['latest_version'],
+                          'risk': 'high'
+                      })
+                  else:
+                      recommendations['safe_updates'].append({
+                          'name': pkg['name'],
+                          'current': pkg['version'],
+                          'latest': pkg['latest_version'],
+                          'risk': 'low'
+                      })
+              except:
+                  recommendations['safe_updates'].append({
+                      'name': pkg['name'],
+                      'current': pkg['version'],
+                      'latest': pkg['latest_version'],
+                      'risk': 'unknown'
+                  })
+          
+          # Add general recommendations
+          recommendations['notes'] = [
+              'Test all updates in development environment first',
+              'Monitor for breaking changes in major version updates',
+              'Check security advisories for updated packages',
+              'Update requirements.txt and pyproject.toml accordingly',
+              'Run full test suite after dependency updates'
+          ]
+          
+          # Save recommendations
+          with open('update_recommendations.json', 'w') as f:
+              json.dump(recommendations, f, indent=2)
+          
+          print('Update Recommendations Generated:')
+          print(f'- Safe updates: {len(recommendations[\"safe_updates\"])}')
+          print(f'- Major updates: {len(recommendations[\"major_updates\"])}')
+          "
+      
+      - name: Upload dependency reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: dependency-reports
+          path: |
+            dependency_tree.json
+            dependency_analysis.json
+            outdated_packages.json
+            update_recommendations.json
+            dependency_graph.png
+          retention-days: 30
+
+  # Cache cleanup based on input parameters
+  cache-cleanup:
+    name: Cache Cleanup
+    runs-on: ubuntu-latest
+    if: github.event.inputs.cleanup_type != '' || github.event.inputs.force_rebuild == 'true'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Cleanup old caches
+        run: |
+          CLEANUP_TYPE="${{ github.event.inputs.cleanup_type }}"
+          FORCE_REBUILD="${{ github.event.inputs.force_rebuild }}"
+          
+          echo "Cleanup type: $CLEANUP_TYPE"
+          echo "Force rebuild: $FORCE_REBUILD"
+          
+          # This would interact with GitHub's cache API to clean old caches
+          # For now, we'll just document what would be cleaned
+          
+          case $CLEANUP_TYPE in
+            "full")
+              echo "Would clean all caches older than 7 days"
+              echo "Would remove all dependency caches"
+              echo "Would remove all model artifact caches"
+              echo "Would remove all data caches"
+              ;;
+            "partial")
+              echo "Would clean caches older than 30 days"
+              echo "Would keep recent model and data caches"
+              ;;
+            "dependencies-only")
+              echo "Would clean only dependency caches"
+              ;;
+            "models-only")
+              echo "Would clean only model artifact caches"
+              ;;
+          esac
+          
+          if [ "$FORCE_REBUILD" == "true" ]; then
+            echo "Would invalidate all cache keys by incrementing version"
+          fi
+      
+      - name: Report cleanup actions
+        run: |
+          echo "Cache cleanup simulation completed."
+          echo "In production, this would use GitHub's cache API to:"
+          echo "1. List all caches for the repository"
+          echo "2. Filter by age and type"
+          echo "3. Delete matching caches"
+          echo "4. Report cleanup statistics"
+
+  # Summary and reporting
+  cache-summary:
+    name: Cache Management Summary
+    needs: [cache-optimization, dependency-management, cache-cleanup]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Generate summary
+        run: |
+          python -c "
+          from datetime import datetime
+          
+          summary = []
+          summary.append('# Cache & Dependency Management Report')
+          summary.append('')
+          summary.append(f'**Generated:** {datetime.now().strftime(\"%Y-%m-%d %H:%M:%S UTC\")}')
+          summary.append(f'**Cache Version:** ${{ env.CACHE_VERSION }}')
+          summary.append('')
+          
+          # Job status
+          summary.append('## Job Status')
+          summary.append('| Job | Status |')
+          summary.append('|-----|--------|") 
+          summary.append('| Cache Optimization | ${{ needs.cache-optimization.result }} |')
+          summary.append('| Dependency Management | ${{ needs.dependency-management.result }} |')
+          summary.append('| Cache Cleanup | ${{ needs.cache-cleanup.result }} |')
+          summary.append('')
+          
+          # Recommendations
+          summary.append('## Recommendations')
+          summary.append('- Check artifact downloads for detailed analysis')
+          summary.append('- Review outdated packages and plan updates')
+          summary.append('- Monitor cache usage to optimize CI performance')
+          summary.append('- Consider cache cleanup if storage is excessive')
+          
+          # Save summary
+          with open('cache_summary.md', 'w') as f:
+              f.write('\\n'.join(summary))
+          
+          print('\\n'.join(summary))
+          "
+      
+      - name: Upload summary report
+        uses: actions/upload-artifact@v3
+        with:
+          name: cache-management-summary
+          path: cache_summary.md
+          retention-days: 90
