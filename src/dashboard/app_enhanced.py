@@ -19,20 +19,42 @@ from typing import Dict, List, Optional, Tuple
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
+# Import new components
+from src.dashboard.theme import DashboardTheme
+from src.dashboard.components.charts import TradingCharts
+from src.dashboard.components.metrics import MetricCards
+from src.dashboard.websocket_client import StreamlitWebSocketManager
+from src.dashboard.pages.live_trading import render_live_trading_page
+
 # Configure page
 st.set_page_config(
-    page_title="Crypto ML Dashboard",
-    page_icon="📊",
+    page_title="ML Trading Pipeline",
+    page_icon="🚀",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Title
-st.title("🚀 Crypto ML Trading Dashboard")
+# Apply theme
+if 'theme' not in st.session_state:
+    st.session_state.theme = 'dark'
+
+theme = DashboardTheme.apply_theme(st.session_state.theme)
+chart_layout = DashboardTheme.get_chart_layout(theme)
+
+# Title with theme
+st.markdown(
+    f"""<h1 style='text-align: center; color: {theme['primary']}; margin-bottom: 0;'>
+    🚀 ML Trading Pipeline Dashboard
+    </h1>""",
+    unsafe_allow_html=True
+)
 st.markdown("---")
 
 # Sidebar for navigation
-st.sidebar.title("📋 Navigation")
+st.sidebar.markdown(f"<h2 style='color: {theme['primary']}'>📋 Navigation</h2>", unsafe_allow_html=True)
+
+# Theme toggle
+DashboardTheme.render_theme_toggle()
 
 # Auto-refresh toggle
 auto_refresh = st.sidebar.checkbox("🔄 Auto-refresh", value=False)
@@ -156,9 +178,12 @@ class DashboardUtils:
 utils = DashboardUtils()
 
 
-# Page: Overview
+# Initialize WebSocket manager for real-time data
+ws_manager = StreamlitWebSocketManager()
+
+# Page routing with new components
 if page == "📊 Overview":
-    st.header("📈 System Overview")
+    st.markdown(f"<h2 style='color: {theme['primary']}'>📈 System Overview</h2>", unsafe_allow_html=True)
     
     # Training status
     training_status = utils.get_training_status()
@@ -175,30 +200,19 @@ if page == "📊 Overview":
         
         col1, col2, col3, col4 = st.columns(4)
         
-        # Real metrics from latest run
-        with col1:
-            sharpe = latest_run.get("metrics.sharpe_ratio", 0)
-            st.metric(
-                label="Sharpe Ratio",
-                value=f"{sharpe:.2f}",
-                delta=f"+{sharpe - 1:.2f}" if sharpe > 1 else f"{sharpe - 1:.2f}"
-            )
+        # Use new MetricCards component
+        performance_data = {
+            'sharpe_ratio': latest_run.get("metrics.sharpe_ratio", 0),
+            'sharpe_delta': latest_run.get("metrics.sharpe_ratio", 0) - 1,
+            'total_return': latest_run.get("metrics.total_return", 0),
+            'return_delta': latest_run.get("metrics.total_return", 0),
+            'max_drawdown': latest_run.get("metrics.max_drawdown", 0),
+            'dd_delta': latest_run.get("metrics.max_drawdown", 0) + 0.2,
+            'win_rate': latest_run.get("metrics.win_rate", 0.5),
+            'wr_delta': 0.05
+        }
         
-        with col2:
-            returns = latest_run.get("metrics.total_return", 0)
-            st.metric(
-                label="Total Return",
-                value=f"{returns:.1%}",
-                delta=f"+{returns:.1%}" if returns > 0 else f"{returns:.1%}"
-            )
-        
-        with col3:
-            mdd = latest_run.get("metrics.max_drawdown", 0)
-            st.metric(
-                label="Max Drawdown",
-                value=f"{mdd:.1%}",
-                delta=f"{mdd + 0.2:.1%}" if mdd < -0.2 else "Good"
-            )
+        MetricCards.render_trading_metrics(performance_data)
         
         with col4:
             f1 = latest_run.get("metrics.f1_score", 0)
@@ -405,31 +419,8 @@ elif page == "🎚️ Threshold Tuning":
 
 # Page: Live Trading
 elif page == "🔴 Live Trading":
-    st.header("🔴 Live Trading Monitor")
-    
-    # Status indicators
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        # Check if paper trader is running
-        try:
-            result = subprocess.run(
-                ["pgrep", "-f", "paper_trader.py"],
-                capture_output=True,
-                text=True
-            )
-            if result.returncode == 0:
-                st.success("✅ Paper Trading Active")
-            else:
-                st.error("❌ Paper Trading Inactive")
-        except:
-            st.warning("⚠️ Status Unknown")
-    
-    with col2:
-        st.metric("Open Positions", "3")
-    
-    with col3:
-        st.metric("Today's P&L", "+$245.32")
+    # Use the new live trading page with real-time features
+    render_live_trading_page()
     
     # Positions table
     st.subheader("📊 Current Positions")

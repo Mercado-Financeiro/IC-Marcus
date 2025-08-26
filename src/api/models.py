@@ -1,12 +1,24 @@
 """Pydantic models for API requests and responses."""
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, ConfigDict
 from typing import Dict, List, Optional, Any, Union
 from datetime import datetime
 
 
 class PredictionRequest(BaseModel):
     """Request para predição única."""
+    model_config = ConfigDict(protected_namespaces=(), json_schema_extra={
+        "example": {
+            "features": {
+                "close": 50000.0,
+                "volume": 1000000.0,
+                "rsi_14": 65.0,
+                "nvt_ratio": 1.2
+            },
+            "request_id": "req_123",
+            "return_probabilities": True
+        }
+    })
     
     features: Dict[str, float] = Field(..., description="Features para predição")
     request_id: Optional[str] = Field(None, description="ID único da requisição")
@@ -18,24 +30,11 @@ class PredictionRequest(BaseModel):
         if not v:
             raise ValueError("Features cannot be empty")
         return v
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "features": {
-                    "close": 50000.0,
-                    "volume": 1000000.0,
-                    "rsi_14": 65.0,
-                    "nvt_ratio": 1.2
-                },
-                "request_id": "req_123",
-                "return_probabilities": True
-            }
-        }
 
 
 class BatchPredictionRequest(BaseModel):
     """Request para predição em batch."""
+    model_config = ConfigDict(protected_namespaces=())
     
     samples: List[Dict[str, float]] = Field(..., description="Lista de amostras")
     request_id: Optional[str] = Field(None, description="ID único da requisição")
@@ -53,6 +52,7 @@ class BatchPredictionRequest(BaseModel):
 
 class PredictionResponse(BaseModel):
     """Response de predição."""
+    model_config = ConfigDict(protected_namespaces=())
     
     prediction: Union[float, int] = Field(..., description="Predição do modelo")
     probabilities: Optional[Dict[str, float]] = Field(None, description="Probabilidades por classe")
@@ -65,6 +65,7 @@ class PredictionResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     """Response de health check."""
+    model_config = ConfigDict(protected_namespaces=())
     
     status: str
     model_loaded: bool
@@ -76,6 +77,7 @@ class HealthResponse(BaseModel):
 
 class MetricsResponse(BaseModel):
     """Response de métricas."""
+    model_config = ConfigDict(protected_namespaces=())
     
     total_predictions: int
     avg_latency_ms: float
@@ -87,6 +89,7 @@ class MetricsResponse(BaseModel):
 
 class WebSocketMessage(BaseModel):
     """Mensagem WebSocket."""
+    model_config = ConfigDict(protected_namespaces=())
     
     token: str
     features: Dict[str, float]
@@ -95,6 +98,7 @@ class WebSocketMessage(BaseModel):
 
 class WebSocketResponse(BaseModel):
     """Response WebSocket."""
+    model_config = ConfigDict(protected_namespaces=())
     
     prediction: Optional[float] = None
     error: Optional[str] = None

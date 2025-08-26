@@ -16,9 +16,9 @@ from dataclasses import dataclass, asdict
 import threading
 from collections import deque
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Setup secure logging
+from src.utils.secure_logging import SecureLogger
+logger = SecureLogger.setup_logger(__name__, log_file='logs/performance.log')
 
 
 @dataclass

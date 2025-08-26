@@ -26,12 +26,9 @@ from src.data.binance_loader import CryptoDataLoader
 from src.features.engineering import FeatureEngineer
 from src.inference.predict import CryptoPredictor
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Setup secure logging
+from src.utils.secure_logging import SecureLogger
+logger = SecureLogger.setup_logger(__name__, log_file='logs/paper_trader.log')
 
 
 class Position:

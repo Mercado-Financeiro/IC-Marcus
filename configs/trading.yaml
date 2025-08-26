@@ -1,0 +1,118 @@
+# Trading Bot Configuration
+# Cryptocurrency ML Trading System
+
+# Trading Parameters
+trading:
+  initial_capital: 10000          # Starting capital in USD
+  position_size_pct: 0.1          # Position size as % of capital (10%)
+  max_positions: 3                # Maximum concurrent positions
+  confidence_threshold: 0.65      # Minimum confidence for trade execution
+  symbols:                        # Trading pairs
+    - BTC/USDT
+    - ETH/USDT
+    - BNB/USDT
+  timeframe: 1h                   # Candle timeframe
+  
+# Risk Management
+risk:
+  stop_loss_pct: 0.02             # Stop loss at 2% loss
+  take_profit_pct: 0.05           # Take profit at 5% gain
+  max_drawdown_pct: 0.10          # Maximum drawdown before stopping
+  trailing_stop: true             # Enable trailing stop
+  trailing_stop_pct: 0.015        # Trailing stop at 1.5%
+  max_daily_loss_pct: 0.05       # Maximum daily loss percentage
+  position_timeout_hours: 24     # Close position after N hours
+  
+# Model Configuration
+model:
+  update_interval: 3600           # Model update interval in seconds
+  min_data_points: 100            # Minimum data points for prediction
+  feature_lookback: 24            # Hours of historical data for features
+  confidence_weights:             # Confidence score weights by model type
+    xgboost: 1.0
+    lstm: 0.9
+  ensemble_mode: false            # Use ensemble of models
+  
+# Signal Generation
+signals:
+  buy_threshold: 0.75             # Strong buy signal threshold
+  sell_threshold: 0.25            # Strong sell signal threshold
+  neutral_zone: 0.1               # Neutral zone around 0.5
+  signal_timeout: 300             # Signal validity in seconds
+  require_volume_confirmation: true  # Require volume spike for signals
+  min_volume_ratio: 1.5           # Minimum volume ratio vs average
+  
+# Exchange Configuration
+exchange:
+  rate_limit: true                # Enable rate limiting
+  timeout: 30000                  # Request timeout in ms
+  enable_rate_limit: true         # Use exchange rate limits
+  retry_attempts: 3               # Number of retry attempts
+  retry_delay: 1000               # Delay between retries in ms
+  
+# Backtesting
+backtesting:
+  start_date: "2024-01-01"        # Backtest start date
+  end_date: "2024-12-31"          # Backtest end date
+  commission: 0.001               # Trading commission (0.1%)
+  slippage: 0.0005                # Slippage (0.05%)
+  
+# Monitoring
+monitoring:
+  log_level: INFO                 # Logging level
+  performance_report_interval: 3600  # Report interval in seconds
+  telegram_notifications: false   # Enable Telegram notifications
+  email_alerts: false             # Enable email alerts
+  dashboard_port: 8501            # Dashboard port
+  
+# Advanced Features
+advanced:
+  use_market_regime: true         # Adapt to market regime
+  regime_detection_window: 168    # Hours for regime detection (1 week)
+  use_sentiment_analysis: false   # Include sentiment in signals
+  use_order_book_imbalance: true  # Use order book data
+  pyramid_positions: false        # Allow position pyramiding
+  max_pyramid_levels: 3           # Maximum pyramid levels
+  
+# Portfolio Optimization
+portfolio:
+  rebalance_interval: 86400       # Rebalance interval in seconds (daily)
+  use_kelly_criterion: false      # Use Kelly criterion for sizing
+  max_correlation: 0.7            # Maximum correlation between assets
+  diversification_penalty: 0.1    # Penalty for concentration
+  
+# Live Trading Specific
+live_trading:
+  paper_trading: true             # Use paper trading mode
+  max_order_retries: 3            # Maximum order placement retries
+  order_type: "limit"             # Order type: market, limit
+  limit_order_offset_pct: 0.001   # Limit order price offset
+  partial_fill_timeout: 60        # Timeout for partial fills in seconds
+  
+# Performance Metrics
+performance:
+  target_sharpe_ratio: 1.5        # Target Sharpe ratio
+  target_win_rate: 0.55           # Target win rate
+  min_profit_factor: 1.2          # Minimum profit factor
+  max_consecutive_losses: 5       # Maximum consecutive losses allowed
+  
+# Data Management
+data:
+  cache_enabled: true             # Enable data caching
+  cache_ttl: 300                  # Cache time-to-live in seconds
+  historical_days: 30             # Days of historical data to maintain
+  update_frequency: 60            # Data update frequency in seconds
+  
+# Alerts and Notifications
+alerts:
+  price_change_pct: 0.05          # Alert on 5% price change
+  volume_spike_ratio: 3.0         # Alert on 3x volume spike
+  drawdown_alert_pct: 0.05        # Alert on 5% drawdown
+  profit_alert_pct: 0.10          # Alert on 10% profit
+  
+# Security
+security:
+  api_key_rotation_days: 30       # Rotate API keys every N days
+  ip_whitelist_enabled: false     # Enable IP whitelist
+  require_2fa: false               # Require 2FA for live trading
+  encrypt_sensitive_data: true    # Encrypt sensitive configuration

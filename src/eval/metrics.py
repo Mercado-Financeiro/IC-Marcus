@@ -12,10 +12,9 @@ from sklearn.metrics import (
     roc_auc_score, average_precision_score,
     brier_score_loss, log_loss,
     confusion_matrix, classification_report,
-    precision_recall_curve, roc_curve,
-    calibration_curve
+    precision_recall_curve, roc_curve
 )
-from sklearn.calibration import CalibratedClassifierCV
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 import warnings
 warnings.filterwarnings('ignore')
 

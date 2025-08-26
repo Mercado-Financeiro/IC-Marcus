@@ -62,14 +62,14 @@ class XGBoostOptunaConfig:
     # XGBoost specific
     tree_method: str = "hist"  # "hist", "gpu_hist", "exact"
     device: str = "cpu"  # "cpu", "gpu", "cuda"
-    n_jobs: int = -1  # For CPU, use all cores (set to 1 for determinism)
+    n_jobs: int = 1  # CHANGED: Default to 1 for determinism (was -1)
     
     # Sampler settings
     sampler_type: str = 'tpe'  # 'tpe', 'random', 'cmaes'
     sampler_params: Dict[str, Any] = field(default_factory=dict)
     
-    # Pruner settings
-    pruner_type: str = 'asha'  # 'asha', 'hyperband', 'successive_halving', 'median', 'percentile'
+    # Pruner settings  
+    pruner_type: str = 'hyperband'  # CHANGED: 'hyperband' is better for XGBoost (was 'asha')
     pruner_params: Dict[str, Any] = field(default_factory=dict)
     
     # Storage settings
@@ -255,9 +255,13 @@ class EnhancedXGBoostOptuna:
     
     def _create_expanded_search_space(self, trial: optuna.Trial) -> Dict[str, Any]:
         """
-        Create expanded hyperparameter search space for XGBoost.
+        Create SENSIBLE hyperparameter search space for XGBoost.
         
-        Includes all important XGBoost parameters following best practices.
+        Following best practices without excessive parameters.
+        FIXED: 
+        - No duplicate grow_policy suggestions
+        - Conditional max_depth/max_leaves based on grow_policy
+        - Sensible parameter ranges based on empirical evidence
         """
         # Determine if GPU is available and requested
         use_gpu = (
@@ -267,26 +271,27 @@ class EnhancedXGBoostOptuna:
         
         tree_method = "gpu_hist" if use_gpu else "hist"
         
+        # Decide grow policy ONCE
+        grow_policy = trial.suggest_categorical('grow_policy', ['depthwise', 'lossguide'])
+        
         params = {
-            # Core XGBoost parameters
-            'n_estimators': trial.suggest_int('n_estimators', 100, 1500, step=50),
-            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=False),
-            'max_depth': trial.suggest_int('max_depth', 3, 12),
-            'min_child_weight': trial.suggest_float('min_child_weight', 0.1, 10.0, log=True),
-            'subsample': trial.suggest_float('subsample', 0.5, 1.0),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-            'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.5, 1.0),
-            'colsample_bynode': trial.suggest_float('colsample_bynode', 0.5, 1.0),
+            # Core XGBoost parameters - SENSIBLE RANGES
+            'n_estimators': trial.suggest_int('n_estimators', 300, 1200, step=50),
+            'learning_rate': trial.suggest_float('learning_rate', 0.015, 0.08, log=True),
             
-            # Regularization parameters
-            'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 10.0, log=True),
-            'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 10.0, log=True),
-            'gamma': trial.suggest_float('gamma', 0.0, 5.0),
+            # Tree structure - conditional on grow_policy
+            'grow_policy': grow_policy,
+            'subsample': trial.suggest_float('subsample', 0.6, 0.95),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 0.9),
             
-            # Tree construction parameters
-            'max_bin': trial.suggest_int('max_bin', 128, 1024, step=64),
-            'grow_policy': trial.suggest_categorical('grow_policy', ['depthwise', 'lossguide']),
-            'max_leaves': trial.suggest_int('max_leaves', 0, 256) if trial.suggest_categorical('grow_policy', ['depthwise', 'lossguide']) == 'lossguide' else 0,
+            # Regularization - PROPER RANGES
+            'reg_alpha': trial.suggest_float('reg_alpha', 1e-4, 3.0, log=True),
+            'reg_lambda': trial.suggest_float('reg_lambda', 1e-3, 15.0, log=True),
+            'gamma': trial.suggest_float('gamma', 0.0, 6.0),
+            
+            # Tree construction - REDUCED COMPLEXITY
+            'max_bin': trial.suggest_categorical('max_bin', [256, 512]),
+            'min_child_weight': trial.suggest_float('min_child_weight', 1.0, 10.0, log=True),
             
             # Sampling parameters - gradient_based only works with GPU
             'sampling_method': 'gradient_based' if use_gpu else 'uniform',
@@ -308,6 +313,16 @@ class EnhancedXGBoostOptuna:
             'validation_fraction': 0.2,  # For early stopping
         }
         
+        # Tree depth/leaves based on grow_policy
+        if grow_policy == 'depthwise':
+            # For depthwise, use max_depth
+            params['max_depth'] = trial.suggest_int('max_depth', 3, 12)
+            params['max_leaves'] = 0  # Not used with depthwise
+        else:  # lossguide
+            # For lossguide, use max_leaves
+            params['max_leaves'] = trial.suggest_int('max_leaves', 31, 255)
+            params['max_depth'] = 0  # Not used with lossguide
+        
         # GPU-specific parameters
         if use_gpu:
             params.update({
@@ -318,11 +333,21 @@ class EnhancedXGBoostOptuna:
         return params
     
     def _create_objective_function(self, X: pd.DataFrame, y: pd.Series):
-        """Create Optuna objective function."""
+        """Create Optuna objective function with enhanced logging."""
         
         def objective(trial: optuna.Trial) -> float:
             # Get hyperparameters
             params = self._create_expanded_search_space(trial)
+            
+            # Log what we're optimizing (only on first trial for clarity)
+            if trial.number == 0:
+                logger.info(
+                    "OPTIMIZATION TARGET CLARIFICATION",
+                    primary_metric=self.config.primary_metric,
+                    eval_metric=self.config.eval_metric,
+                    direction="MAXIMIZE",
+                    note=f"Optimizing {self.config.primary_metric.upper()} - higher is better"
+                )
             
             # Extract validation parameters
             early_stopping_rounds = params.pop('early_stopping_rounds')
@@ -386,11 +411,31 @@ class EnhancedXGBoostOptuna:
                 if trial.should_prune():
                     raise optuna.TrialPruned()
             
+            # Calculate mean and variance
+            mean_score = np.mean(scores)
+            std_score = np.std(scores)
+            cv_variance = (std_score / mean_score * 100) if mean_score > 0 else 0
+            
+            # Log trial results with variance
+            logger.info(
+                f"Trial {trial.number} completed",
+                metric=self.config.primary_metric,
+                mean_score=f"{mean_score:.4f}",
+                std_score=f"{std_score:.4f}",
+                cv_variance_pct=f"{cv_variance:.2f}%",
+                fold_scores=[f"{s:.4f}" for s in scores]
+            )
+            
+            # Store variance in trial user attributes for later analysis
+            trial.set_user_attr('cv_std', std_score)
+            trial.set_user_attr('cv_variance_pct', cv_variance)
+            trial.set_user_attr('fold_scores', scores)
+            
             # Final cleanup
             import gc
             gc.collect()
             
-            return np.mean(scores)
+            return mean_score
         
         return objective
     
@@ -710,20 +755,74 @@ class EnhancedXGBoostOptuna:
         }).sort_values('importance', ascending=False)
     
     def get_optimization_summary(self) -> Dict:
-        """Get summary of optimization results."""
+        """Get enhanced summary of optimization results with variance analysis."""
         if self.study is None:
             return {}
         
-        return {
+        # Get best trial info
+        best_trial = self.study.best_trial
+        best_cv_std = best_trial.user_attrs.get('cv_std', 0)
+        best_cv_variance = best_trial.user_attrs.get('cv_variance_pct', 0)
+        best_fold_scores = best_trial.user_attrs.get('fold_scores', [])
+        
+        # Calculate improvement statistics
+        completed_trials = [t for t in self.study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+        if len(completed_trials) > 1:
+            # First completed trial score
+            first_score = completed_trials[0].value
+            # Best score
+            best_score = self.study.best_value
+            # Improvement
+            improvement = (best_score - first_score) / first_score * 100 if first_score > 0 else 0
+            
+            # Get variance across all trials
+            all_scores = [t.value for t in completed_trials]
+            trials_std = np.std(all_scores)
+            trials_mean = np.mean(all_scores)
+            
+            # Is improvement statistically significant?
+            # If improvement > 2 * std, it's likely significant
+            significant = abs(best_score - first_score) > (2 * trials_std)
+        else:
+            improvement = 0
+            trials_std = 0
+            trials_mean = self.study.best_value if self.study.best_value else 0
+            significant = False
+        
+        summary = {
             'n_trials': len(self.study.trials),
+            'n_completed': len(completed_trials),
+            'n_pruned': len([t for t in self.study.trials if t.state == optuna.trial.TrialState.PRUNED]),
+            'optimization_metric': self.config.primary_metric,
             'best_score': self.study.best_value,
+            'best_trial_number': best_trial.number,
             'best_params': self.study.best_params,
+            'best_cv_std': best_cv_std,
+            'best_cv_variance_pct': best_cv_variance,
+            'best_fold_scores': best_fold_scores,
+            'improvement_from_first': f"{improvement:.2f}%",
+            'improvement_significant': significant,
+            'all_trials_std': trials_std,
+            'all_trials_mean': trials_mean,
             'pruner_type': self.config.pruner_type,
             'sampler_type': self.config.sampler_type,
             'calibration_method': self.config.calibration_method,
             'tree_method': self.config.tree_method,
             'determinism_verified': getattr(self, 'determinism_results', {}).get('verification', {})
         }
+        
+        # Log summary
+        logger.info(
+            "OPTIMIZATION SUMMARY",
+            metric=self.config.primary_metric,
+            best_score=f"{self.study.best_value:.4f}",
+            improvement=f"{improvement:.2f}%",
+            significant=significant,
+            best_cv_variance=f"{best_cv_variance:.2f}%",
+            note="Improvement is significant if > 2*std across trials"
+        )
+        
+        return summary
     
     # Sklearn compatibility methods
     def get_params(self, deep: bool = True) -> Dict:

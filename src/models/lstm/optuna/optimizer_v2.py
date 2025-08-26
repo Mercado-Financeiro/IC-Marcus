@@ -30,6 +30,7 @@ from ...calibration.temperature import TemperatureScaling, VectorScaling
 from ...metrics.calibration import comprehensive_calibration_metrics, expected_calibration_error
 from ...validation.walkforward import WalkForwardValidator, WalkForwardConfig
 from ....utils.determinism_enhanced import set_full_determinism, DeterministicContext
+from ...threshold_optimizer import ThresholdOptimizer, TradingCosts
 
 # Import existing LSTM components
 from .config import LSTMOptunaConfig
@@ -103,6 +104,7 @@ class EnhancedLSTMOptuna:
         self.calibrator = None
         self.threshold_f1 = 0.5
         self.threshold_ev = 0.5
+        self.threshold_optimizer = None  # For EV-based threshold optimization
         self.feature_names_ = None
         self.wrapper = None
         
@@ -484,16 +486,37 @@ class EnhancedLSTMOptuna:
                 brier_score=cal_metrics.get('brier_score', 0))
     
     def _optimize_thresholds(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Optimize classification thresholds."""
+        """Optimize classification thresholds using F1 and Expected Value."""
         # Optimize F1 threshold
         precision, recall, thresholds = precision_recall_curve(y_true, y_pred_proba)
         f1_scores = 2 * (precision * recall) / (precision + recall + 1e-10)
         best_idx = np.argmax(f1_scores[:-1])
         self.threshold_f1 = thresholds[best_idx]
         
-        # Optimize EV threshold (using a simple heuristic)
-        # In practice, this should use actual expected value calculation
-        self.threshold_ev = np.percentile(y_pred_proba, 70)
+        # Optimize EV threshold using ThresholdOptimizer
+        # Initialize with default trading costs
+        costs = TradingCosts(
+            fee_bps=5.0,      # 0.05% exchange fee
+            slippage_bps=5.0,  # 0.05% typical slippage
+            impact_bps=2.0     # 0.02% market impact
+        )
+        
+        self.threshold_optimizer = ThresholdOptimizer(costs=costs)
+        
+        # Convert probabilities to 2D array for compatibility
+        y_proba_2d = np.column_stack([1 - y_pred_proba, y_pred_proba])
+        
+        # Optimize threshold for maximum expected value
+        ev_results = self.threshold_optimizer.optimize_threshold(
+            y_true=y_true,
+            y_proba=y_pred_proba,
+            avg_win_pct=0.015,  # 1.5% average win
+            avg_loss_pct=0.005,  # 0.5% average loss
+            method='adaptive',
+            n_points=100
+        )
+        
+        self.threshold_ev = ev_results.optimal_threshold
         
         log.info("thresholds_optimized",
                 threshold_f1=self.threshold_f1,

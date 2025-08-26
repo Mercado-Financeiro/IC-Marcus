@@ -46,7 +46,10 @@ from src.models.lstm.optuna.optimizer_v2 import EnhancedLSTMOptuna
 from src.models.lstm.optuna.config import LSTMOptunaConfig
 from src.models.optuna.advanced_optimizer import AdvancedOptimizerConfig
 from src.data.binance_loader import CryptoDataLoader
+from src.data.quality_pipeline import DataQualityPipeline
+from src.data.splits import temporal_train_test_split
 from src.features.engineering import FeatureEngineer
+from src.features.filters import FeatureFilter
 from src.utils.determinism_enhanced import set_full_determinism, assert_determinism
 from src.utils.logging import log as logger
 
@@ -138,8 +141,8 @@ def main():
                        help='Number of outer CV folds (default: 3)')
     parser.add_argument('--inner-cv', type=int, default=3,
                        help='Number of inner CV folds (default: 3)')
-    parser.add_argument('--embargo', type=int, default=10,
-                       help='Embargo period for time series validation (default: 10)')
+    parser.add_argument('--embargo', type=int, default=40,
+                       help='Embargo period for time series validation (default: 40 bars = 10 hours for 15m)')
     
     # Calibration parameters
     parser.add_argument('--calibration', choices=['temperature', 'vector', 'isotonic', 'platt'],
@@ -162,6 +165,21 @@ def main():
                        help='Label horizon in bars (default: 5)')
     parser.add_argument('--label-threshold', type=float, default=0.002,
                        help='Return threshold for labels (default: 0.002)')
+    
+    # Data quality parameters
+    parser.add_argument('--enable-quality-pipeline', action='store_true', default=True,
+                       help='Enable data quality pipeline with zombie removal (default: True)')
+    parser.add_argument('--disable-quality-pipeline', dest='enable_quality_pipeline',
+                       action='store_false',
+                       help='Disable data quality pipeline')
+    parser.add_argument('--aggressive-filtering', action='store_true', default=True,
+                       help='Use aggressive feature filtering (default: True)')
+    parser.add_argument('--max-features', type=int, default=100,
+                       help='Maximum number of features for LSTM (default: 100)')
+    parser.add_argument('--variance-threshold', type=float, default=0.02,
+                       help='Minimum variance threshold for features (default: 0.02)')
+    parser.add_argument('--correlation-threshold', type=float, default=0.90,
+                       help='Maximum correlation between features (default: 0.90)')
     
     # Storage parameters
     parser.add_argument('--storage-url', type=str,
@@ -276,14 +294,115 @@ def main():
     X = X[mask]
     y = y[mask]
     
-    print(f"   ✅ Final dataset: {len(y):,} samples ({y.mean():.2%} positive)")
+    print(f"   ✅ Initial dataset: {len(y):,} samples ({y.mean():.2%} positive)")
+    print(f"       Initial features: {X.shape[1]} features")
     
-    # Log data quality metrics
+    # 6a. Apply Data Quality Pipeline if enabled
+    if args.enable_quality_pipeline:
+        print("\n6a. Applying Data Quality Pipeline...")
+        print(f"    - Embargo: {args.embargo} bars (~{args.embargo * 0.25:.1f} hours for 15m)")
+        print(f"    - Variance threshold: {args.variance_threshold}")
+        print(f"    - Correlation threshold: {args.correlation_threshold}")
+        print(f"    - Max features for LSTM: {args.max_features}")
+        
+        # Create quality pipeline
+        quality_pipeline = DataQualityPipeline(
+            symbol=args.symbol,
+            timeframe=args.timeframe,
+            embargo_bars=args.embargo,
+            train_ratio=0.6,
+            val_ratio=0.2,
+            variance_threshold=args.variance_threshold,
+            correlation_threshold=args.correlation_threshold,
+            max_features=args.max_features,  # LSTM benefits from fewer features
+            strict_mode=False,
+            save_reports=True
+        )
+        
+        try:
+            # Process through quality pipeline
+            pipeline_result = quality_pipeline.process(
+                df=df,
+                features=X,
+                target=y
+            )
+            
+            # Extract cleaned data
+            X_train = pipeline_result['X_train']
+            X_val = pipeline_result['X_val']
+            X_test = pipeline_result['X_test']
+            y_train = pipeline_result['y_train']
+            y_val = pipeline_result['y_val']
+            y_test = pipeline_result['y_test']
+            
+            # Combine for optimizer (it will do its own splits)
+            X = pd.concat([X_train, X_val, X_test])
+            y = pd.concat([y_train, y_val, y_test])
+            
+            # Log pipeline metrics
+            metrics = pipeline_result['metrics']
+            print(f"   ✅ Quality pipeline completed:")
+            print(f"       - Features reduced: {metrics['original_features']} → {metrics['filtered_features']} ({metrics['feature_reduction_pct']:.1f}% reduction)")
+            print(f"       - Zombie features removed: {metrics['zombie_features_removed']}")
+            print(f"       - Validation pass rate: {metrics['validation_pass_rate']:.1f}%")
+            
+            mlflow.log_metrics({
+                'features_original': metrics['original_features'],
+                'features_filtered': metrics['filtered_features'],
+                'feature_reduction_pct': metrics['feature_reduction_pct'],
+                'zombie_features_removed': metrics['zombie_features_removed'],
+                'embargo_bars': metrics['embargo_bars'],
+                'validation_pass_rate': metrics['validation_pass_rate']
+            })
+            
+        except Exception as e:
+            print(f"   ⚠️ Quality pipeline failed: {e}")
+            print("   Falling back to simple filtering...")
+            
+            # Fallback to simple feature filtering
+            feature_filter = FeatureFilter(
+                variance_threshold=args.variance_threshold,
+                correlation_threshold=args.correlation_threshold,
+                remove_zombie_features=True
+            )
+            feature_filter.fit(X, y)
+            X = feature_filter.transform(X)
+            
+            # Limit features for LSTM
+            if X.shape[1] > args.max_features:
+                print(f"   Reducing features to {args.max_features} for LSTM...")
+                from sklearn.feature_selection import SelectKBest, mutual_info_classif
+                selector = SelectKBest(mutual_info_classif, k=args.max_features)
+                X = pd.DataFrame(
+                    selector.fit_transform(X, y),
+                    index=X.index,
+                    columns=X.columns[selector.get_support()]
+                )
+            
+            print(f"   ✅ Simple filtering applied: {X.shape[1]} features retained")
+    
+    else:
+        print("\n6a. Data quality pipeline disabled - using raw features")
+        # Still limit features for LSTM even without pipeline
+        if X.shape[1] > args.max_features:
+            print(f"   Reducing features to {args.max_features} for LSTM...")
+            from sklearn.feature_selection import SelectKBest, mutual_info_classif
+            selector = SelectKBest(mutual_info_classif, k=args.max_features)
+            X = pd.DataFrame(
+                selector.fit_transform(X, y),
+                index=X.index,
+                columns=X.columns[selector.get_support()]
+            )
+    
+    print(f"\n   ✅ Final dataset: {len(y):,} samples, {X.shape[1]} features")
+    print(f"       Class balance: {y.mean():.2%} positive")
+    
+    # Log final data quality metrics
     mlflow.log_metrics({
         'final_samples': len(y),
         'positive_rate': float(y.mean()),
-        'feature_completeness': float(mask.mean()),
-        'n_features_final': X.shape[1]
+        'n_features_final': X.shape[1],
+        'quality_pipeline_enabled': int(args.enable_quality_pipeline)
     })
     
     if len(y) < 1000:
@@ -375,6 +494,9 @@ def main():
     print(f"\n📊 Classification Report (F1 threshold):")
     print(classification_report(y, y_pred, digits=4))
     
+    print(f"\n💰 Classification Report (EV threshold):")
+    print(classification_report(y, y_pred_ev, digits=4))
+    
     # Calculate metrics
     from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, average_precision_score
     
@@ -386,9 +508,30 @@ def main():
         'f1_ev_threshold': f1_score(y, y_pred_ev, zero_division=0)
     }
     
+    # Get EV optimization results if available
+    if hasattr(optimizer, 'threshold_optimizer') and optimizer.threshold_optimizer and optimizer.threshold_optimizer.last_results:
+        ev_results = optimizer.threshold_optimizer.last_results
+        metrics.update({
+            'ev_per_opportunity': ev_results.max_ev,
+            'ev_per_trade': ev_results.ev_per_trade,
+            'precision_at_ev_threshold': ev_results.precision_at_threshold,
+            'expected_trades': ev_results.expected_trades_per_period,
+            'optimal_threshold_f1': optimizer.threshold_f1,
+            'optimal_threshold_ev': optimizer.threshold_ev
+        })
+        
+        print(f"\n💵 Expected Value Metrics:")
+        print(f"   EV per opportunity: {ev_results.max_ev:.5f}")
+        print(f"   EV per trade: {ev_results.ev_per_trade:.4%}")
+        print(f"   Precision at EV threshold: {ev_results.precision_at_threshold:.2%}")
+        print(f"   Expected trades: {ev_results.expected_trades_per_period}")
+        print(f"   F1 threshold: {optimizer.threshold_f1:.3f}")
+        print(f"   EV threshold: {optimizer.threshold_ev:.3f}")
+    
     print(f"\n📈 Final Metrics:")
     for metric_name, metric_value in metrics.items():
-        print(f"   {metric_name}: {metric_value:.4f}")
+        if 'threshold' not in metric_name and 'ev' not in metric_name.lower():
+            print(f"   {metric_name}: {metric_value:.4f}")
     
     # Log final metrics
     mlflow.log_metrics(metrics)

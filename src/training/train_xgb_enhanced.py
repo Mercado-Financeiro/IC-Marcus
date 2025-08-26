@@ -44,9 +44,30 @@ from sklearn.metrics import classification_report, average_precision_score
 # Import our enhanced modules
 from src.models.xgb.optuna.optimizer_enhanced import EnhancedXGBoostOptuna, XGBoostOptunaConfig
 from src.data.binance_loader import CryptoDataLoader
+from src.data.quality_pipeline import DataQualityPipeline
+from src.data.splits import temporal_train_test_split
 from src.features.engineering import FeatureEngineer
+from src.features.filters import FeatureFilter
 from src.utils.determinism_enhanced import set_full_determinism, assert_determinism
 from src.utils.logging import log as logger
+
+
+def get_git_commit_safe() -> str:
+    """Safely get git commit hash without command injection risks."""
+    try:
+        import subprocess
+        # Security: Use subprocess with explicit args (no shell=True)
+        result = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            capture_output=True,
+            text=True,
+            timeout=5,  # Prevent hanging
+            check=True  # Raise on non-zero exit
+        )
+        return result.stdout.strip()[:8]
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        # Fallback: return a safe default if git is not available or fails
+        return "unknown"
 
 
 def create_labels(df: pd.DataFrame, horizon: int = 5, threshold: float = 0.002) -> pd.Series:
@@ -83,7 +104,7 @@ def setup_mlflow(args):
         'outer_cv': str(args.outer_cv),
         'mode': 'fast' if args.fast else 'full',
         'deterministic': 'true',
-        'git_commit': os.popen('git rev-parse HEAD').read().strip()[:8],
+        'git_commit': get_git_commit_safe(),
         'script': 'train_xgb_enhanced.py',
         'framework': 'xgboost',
         'data_source': 'binance'
@@ -148,8 +169,8 @@ def main():
                        help='Number of outer CV folds (default: 3)')
     parser.add_argument('--inner-cv', type=int, default=5,
                        help='Number of inner CV folds (default: 5)')
-    parser.add_argument('--embargo', type=int, default=10,
-                       help='Embargo period for time series validation (default: 10)')
+    parser.add_argument('--embargo', type=int, default=40,
+                       help='Embargo period for time series validation (default: 40 bars = 10 hours for 15m)')
     
     # Calibration parameters
     parser.add_argument('--calibration', choices=['auto', 'platt', 'isotonic', 'beta'],
@@ -174,6 +195,21 @@ def main():
                        help='Label horizon in bars (default: 5)')
     parser.add_argument('--label-threshold', type=float, default=0.002,
                        help='Return threshold for labels (default: 0.002)')
+    
+    # Data quality parameters
+    parser.add_argument('--enable-quality-pipeline', action='store_true', default=True,
+                       help='Enable data quality pipeline with zombie removal (default: True)')
+    parser.add_argument('--disable-quality-pipeline', dest='enable_quality_pipeline', 
+                       action='store_false',
+                       help='Disable data quality pipeline')
+    parser.add_argument('--aggressive-filtering', action='store_true', default=True,
+                       help='Use aggressive feature filtering (default: True)')
+    parser.add_argument('--max-features', type=int, default=None,
+                       help='Maximum number of features after filtering (default: no limit)')
+    parser.add_argument('--variance-threshold', type=float, default=0.02,
+                       help='Minimum variance threshold for features (default: 0.02)')
+    parser.add_argument('--correlation-threshold', type=float, default=0.90,
+                       help='Maximum correlation between features (default: 0.90)')
     
     # Storage parameters
     parser.add_argument('--storage-url', type=str,
@@ -290,14 +326,93 @@ def main():
     X = X[mask]
     y = y[mask]
     
-    print(f"   [OK] Final dataset: {len(y):,} samples ({y.mean():.2%} positive)")
+    print(f"   [OK] Initial dataset: {len(y):,} samples ({y.mean():.2%} positive)")
+    print(f"       Initial features: {X.shape[1]} features")
     
-    # Log data quality metrics
+    # 6a. Apply Data Quality Pipeline if enabled
+    if args.enable_quality_pipeline:
+        print("\n6a. Applying Data Quality Pipeline...")
+        print(f"    - Embargo: {args.embargo} bars (~{args.embargo * 0.25:.1f} hours for 15m)")
+        print(f"    - Variance threshold: {args.variance_threshold}")
+        print(f"    - Correlation threshold: {args.correlation_threshold}")
+        
+        # Create quality pipeline
+        quality_pipeline = DataQualityPipeline(
+            symbol=args.symbol,
+            timeframe=args.timeframe,
+            embargo_bars=args.embargo,
+            train_ratio=0.6,
+            val_ratio=0.2,
+            variance_threshold=args.variance_threshold,
+            correlation_threshold=args.correlation_threshold,
+            max_features=args.max_features,
+            strict_mode=False,
+            save_reports=True
+        )
+        
+        try:
+            # Process through quality pipeline
+            pipeline_result = quality_pipeline.process(
+                df=df,
+                features=X,
+                target=y
+            )
+            
+            # Extract cleaned data
+            X_train = pipeline_result['X_train']
+            X_val = pipeline_result['X_val']
+            X_test = pipeline_result['X_test']
+            y_train = pipeline_result['y_train']
+            y_val = pipeline_result['y_val']
+            y_test = pipeline_result['y_test']
+            
+            # Combine for optimizer (it will do its own splits)
+            X = pd.concat([X_train, X_val, X_test])
+            y = pd.concat([y_train, y_val, y_test])
+            
+            # Log pipeline metrics
+            metrics = pipeline_result['metrics']
+            print(f"   [OK] Quality pipeline completed:")
+            print(f"       - Features reduced: {metrics['original_features']} → {metrics['filtered_features']} ({metrics['feature_reduction_pct']:.1f}% reduction)")
+            print(f"       - Zombie features removed: {metrics['zombie_features_removed']}")
+            print(f"       - Validation pass rate: {metrics['validation_pass_rate']:.1f}%")
+            
+            mlflow.log_metrics({
+                'features_original': metrics['original_features'],
+                'features_filtered': metrics['filtered_features'],
+                'feature_reduction_pct': metrics['feature_reduction_pct'],
+                'zombie_features_removed': metrics['zombie_features_removed'],
+                'embargo_bars': metrics['embargo_bars'],
+                'validation_pass_rate': metrics['validation_pass_rate']
+            })
+            
+        except Exception as e:
+            print(f"   [WARNING] Quality pipeline failed: {e}")
+            print("   Falling back to simple filtering...")
+            
+            # Fallback to simple feature filtering
+            feature_filter = FeatureFilter(
+                variance_threshold=args.variance_threshold,
+                correlation_threshold=args.correlation_threshold,
+                remove_zombie_features=True
+            )
+            feature_filter.fit(X, y)
+            X = feature_filter.transform(X)
+            
+            print(f"   [OK] Simple filtering applied: {X.shape[1]} features retained")
+    
+    else:
+        print("\n6a. Data quality pipeline disabled - using raw features")
+    
+    print(f"\n   [OK] Final dataset: {len(y):,} samples, {X.shape[1]} features")
+    print(f"       Class balance: {y.mean():.2%} positive")
+    
+    # Log final data quality metrics
     mlflow.log_metrics({
         'final_samples': len(y),
         'positive_rate': float(y.mean()),
-        'feature_completeness': float(mask.mean()),
-        'n_features_final': X.shape[1]
+        'n_features_final': X.shape[1],
+        'quality_pipeline_enabled': int(args.enable_quality_pipeline)
     })
     
     if len(y) < 1000:
