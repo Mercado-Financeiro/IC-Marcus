@@ -1,97 +1,241 @@
-# Temporal Validation Configuration
-# This file defines the standard validation strategies for time series data
+# Data Quality and Validation Configuration
+# Comprehensive settings for the data quality pipeline
 
-# Default validation strategy
-default_strategy: purged_kfold
-
-# Purged K-Fold Configuration (Recommended Default)
-purged_kfold:
-  n_splits: 5
-  embargo: 10  # Number of bars to embargo between train and validation
-  purge: 5     # Number of bars to purge before validation
-  check_leakage: true
-  min_train_samples: 1000
-  min_test_samples: 200
-  time_resolution_minutes: 15  # For 15-minute bars
-
-# Walk-Forward Configuration
-walk_forward:
-  window_size: 252  # ~1 year of daily data or ~15 days of 15-min data
-  test_size: 63    # ~3 months of daily data or ~4 days of 15-min data
-  gap: 0           # Gap between train and test
-  max_splits: 10   # Maximum number of walk-forward windows
-
-# Expanding Window Configuration (Anchored Walk-Forward)
-expanding_window:
-  min_train_size: 252  # Minimum training window
-  test_size: 63       # Test window size
-  gap: 0              # Gap between train and test
-  max_splits: 10      # Maximum number of splits
-
-# Combinatorial Purged Cross-Validation (Advanced)
-combinatorial:
-  n_splits: 6         # Total number of groups
-  n_test_groups: 2    # Number of groups for testing in each fold
-  embargo: 10         # Embargo between groups
-
-# Validation Rules (CRITICAL - DO NOT DISABLE)
-validation_rules:
-  # NEVER set any of these to false in production!
-  enforce_temporal_order: true    # Data must be time-ordered
-  enforce_no_shuffle: true        # Prevent shuffling of time series
-  enforce_embargo: true           # Require embargo between splits
-  enforce_purging: true           # Require purging before validation
-  check_for_leakage: true        # Automatic leakage detection
+# Feature Filtering Configuration
+feature_filter:
+  # Variance threshold for removing low-variance features
+  variance_threshold: 0.02
   
-# Leakage Detection Thresholds
-leakage_detection:
-  min_embargo_minutes: 150  # Minimum 2.5 hours between train/val
-  min_purge_minutes: 75     # Minimum 1.25 hours purge
-  allow_warnings: true      # Show warnings for minor violations
-  fail_on_leakage: true    # Fail validation if leakage detected
+  # Correlation threshold for removing highly correlated features
+  correlation_threshold: 0.90
+  
+  # Mutual information threshold for feature selection
+  mutual_info_threshold: 0.005
+  
+  # VIF threshold for multicollinearity (if enabled)
+  vif_threshold: 10.0
+  
+  # Enable VIF filtering (slower but more thorough)
+  use_vif: false
+  
+  # Remove zombie features (calendar-based with no predictive power)
+  remove_zombie_features: true
+  
+  # Performance optimizations
+  use_chunks: true
+  chunk_size: 1000
+  
+  # Enable circuit breaker for resilience
+  use_circuit_breaker: true
+  
+  # Maximum features to keep after filtering
+  max_features: 150
 
-# Strategy Selection by Data Size
-auto_strategy_selection:
-  small_data:  # < 5000 samples
-    strategy: purged_kfold
-    n_splits: 3
-  medium_data: # 5000-50000 samples
-    strategy: purged_kfold
+# Temporal Split Configuration
+temporal_split:
+  # Training set ratio
+  train_ratio: 0.6
+  
+  # Validation set ratio
+  val_ratio: 0.2
+  
+  # Test set ratio (automatically calculated as 1 - train - val)
+  test_ratio: 0.2
+  
+  # Embargo period in bars between splits
+  embargo_bars: 40
+  
+  # Purged K-Fold settings
+  purged_kfold:
     n_splits: 5
-  large_data:  # > 50000 samples
-    strategy: walk_forward
-    n_windows: 10
+    embargo_bars: 40
 
-# Model-Specific Overrides
-model_overrides:
-  xgboost:
-    embargo: 10
-    purge: 5
-  lstm:
-    embargo: 20  # LSTMs need larger embargo due to sequence dependencies
-    purge: 10
-  ensemble:
-    embargo: 15
-    purge: 8
+# OHLCV Data Validation
+ohlcv_validation:
+  # Check for price consistency (high >= low, etc.)
+  check_price_consistency: true
+  
+  # Check for zero or negative volumes
+  check_volume_validity: true
+  
+  # Maximum allowed price change per bar (as ratio)
+  max_price_change: 0.5
+  
+  # Minimum required data completeness
+  min_completeness: 0.95
+  
+  # Check for weekend/holiday gaps
+  check_temporal_gaps: true
+  
+  # Maximum allowed gap in hours
+  max_gap_hours: 72
 
-# Production Settings
-production:
-  strategy: walk_forward  # Always use walk-forward in production
-  retrain_frequency: 100  # Retrain every 100 bars
-  embargo: 20            # Conservative embargo for production
-  purge: 10              # Conservative purge for production
-  validate_before_deploy: true
-  min_validation_score: 0.6  # Minimum score to deploy model
+# Feature Data Validation
+feature_validation:
+  # Maximum allowed NaN ratio
+  max_nan_ratio: 0.05
+  
+  # Check for infinite values
+  check_infinites: true
+  
+  # Check for constant columns
+  check_constants: true
+  
+  # Check for duplicate columns
+  check_duplicates: true
+  
+  # Statistical checks
+  statistical_checks:
+    # Check for extreme outliers (z-score threshold)
+    outlier_threshold: 10
+    
+    # Check for unrealistic values
+    check_bounds: true
+    
+    # Feature value bounds (for normalized features)
+    min_value: -100
+    max_value: 100
 
-# Backtesting Settings
-backtesting:
-  use_combinatorial: false  # Too expensive for regular backtests
-  use_walk_forward: true    # Most realistic for backtesting
-  embargo_multiplier: 1.5   # Extra conservative for backtests
+# Target Validation
+target_validation:
+  # Expected target values for binary classification
+  expected_values: [0, 1]
+  
+  # Check class balance
+  check_balance: true
+  
+  # Minimum minority class ratio
+  min_minority_ratio: 0.1
+  
+  # Maximum minority class ratio
+  max_minority_ratio: 0.5
 
-# Debug Settings (DEV ONLY - NEVER USE IN PRODUCTION)
-debug:
-  disable_checks: false  # NEVER set to true in production
-  allow_shuffle: false   # NEVER set to true for time series
-  skip_embargo: false    # NEVER set to true in production
-  verbose_logging: true  # Detailed logging for debugging
+# Circuit Breaker Configuration
+circuit_breaker:
+  # Correlation filter circuit breaker
+  correlation:
+    failure_threshold: 3
+    recovery_timeout: 30
+    
+  # Mutual information circuit breaker
+  mutual_info:
+    failure_threshold: 5
+    recovery_timeout: 60
+    
+  # VIF circuit breaker
+  vif:
+    failure_threshold: 2
+    recovery_timeout: 120
+    
+  # Zombie feature detection circuit breaker
+  zombie:
+    failure_threshold: 10
+    recovery_timeout: 30
+
+# Great Expectations Integration
+great_expectations:
+  # Enable Great Expectations validation
+  enabled: true
+  
+  # Project root directory
+  project_root: "."
+  
+  # Great Expectations directory
+  expectations_dir: "great_expectations"
+  
+  # Generate data documentation
+  create_docs: true
+  
+  # Expectation suites to use
+  expectation_suites:
+    - ohlcv_expectations
+    - feature_expectations
+    - target_expectations
+  
+  # Validation strictness
+  strict_mode: false
+
+# Pipeline Configuration
+pipeline:
+  # Symbol to validate (for logging)
+  symbol: "BTCUSDT"
+  
+  # Timeframe
+  timeframe: "15m"
+  
+  # Strict mode (warnings become errors)
+  strict_mode: false
+  
+  # Save validation reports
+  save_reports: true
+  
+  # Reports directory
+  reports_dir: "artifacts/data_quality"
+  
+  # Enable detailed logging
+  verbose: true
+
+# Performance Settings
+performance:
+  # Maximum memory usage in MB
+  max_memory_mb: 4096
+  
+  # Maximum processing time in seconds
+  max_processing_time: 300
+  
+  # Enable parallel processing where possible
+  use_parallel: false
+  
+  # Number of parallel workers
+  n_workers: 4
+
+# Data Quality Thresholds
+quality_thresholds:
+  # Minimum overall validation pass rate
+  min_pass_rate: 0.90
+  
+  # Critical checks that must pass
+  critical_checks:
+    - temporal_leakage
+    - data_completeness
+    - target_validity
+  
+  # Warning-level checks
+  warning_checks:
+    - class_balance
+    - outlier_detection
+    - feature_correlation
+
+# Monitoring and Alerting
+monitoring:
+  # Enable monitoring
+  enabled: true
+  
+  # Metrics to track
+  metrics:
+    - validation_pass_rate
+    - feature_reduction_ratio
+    - processing_time
+    - memory_usage
+    - circuit_breaker_triggers
+  
+  # Alert thresholds
+  alerts:
+    validation_failure_rate: 0.2
+    processing_time_seconds: 300
+    memory_usage_mb: 4096
+    circuit_breaker_open_count: 5
+
+# Fallback Configuration
+fallback:
+  # Enable fallback mechanisms
+  enabled: true
+  
+  # Simple correlation filter if optimized fails
+  use_simple_correlation: true
+  
+  # Keep top N features by variance if all else fails
+  fallback_top_features: 100
+  
+  # Disable complex validations in fallback mode
+  simplified_validation: true

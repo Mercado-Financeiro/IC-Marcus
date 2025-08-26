@@ -137,3 +137,133 @@ selected_features.csv
 
 # Ambiente virtual Windows
 venv_windows/
+
+# =============================================================
+# Arquivos de documentação e relatórios gerados
+# =============================================================
+
+# Relatórios de refatoração e análise
+COMPREHENSIVE_REFACTORING_REPORT.md
+REFACTORING_REPORT.md
+SECURITY_AUDIT_REPORT.md
+xgboost_validation_report.md
+
+# Documentação de arquitetura gerada
+docs/architecture/ARCHITECTURAL_RECOMMENDATIONS.md
+docs/architecture/CICD_TESTING_FRAMEWORK.md
+docs/architecture/UNIFIED_CONFIGURATION_SYSTEM.md
+docs/architecture/VALIDATION_METHODOLOGY.md
+docs/architecture/PROFIT_ORIENTED_ARCHITECTURE.md
+docs/architecture/feature_filtering_system.md
+
+# Documentação de projeto gerada
+docs/project/ARCHITECTURAL_EVOLUTION_SUMMARY.md
+docs/project/PROFIT_PIPELINE_IMPLEMENTATION.md
+docs/CONFIG_MIGRATION_GUIDE.md
+docs/config_refactoring_report.md
+
+# =============================================================
+# Scripts experimentais e de automação
+# =============================================================
+
+# Scripts de pipeline e automação
+run_full_pipeline.sh
+run_profit_pipeline.sh
+start_interface.sh
+test_full_pipeline.sh
+
+# Scripts de geração de plots e visualizações
+create_readme_plots.py
+generate_docs_plots.py
+
+# Scripts de treinamento específicos
+scripts/train_profit_lstm.py
+scripts/train_profit_pipeline.py
+
+# Logs específicos de pipeline
+test_full_pipeline.log*
+*pipeline*.log
+
+# Configurações específicas de experimentos
+configs/alerting.json
+configs/xgboost.json
+
+# Notebooks experimentais
+notebooks/demo_config_system.py
+notebooks/kucoin_integration.py
+
+# =============================================================
+# Código fonte experimental/em desenvolvimento
+# =============================================================
+
+# Diretórios experimentais
+docs/images/
+examples/
+src/remediation/
+
+# Arquivos específicos experimentais
+src/api/main_secure.py
+
+# =============================================================
+# Arquivos de segurança e monitoramento
+# =============================================================
+
+# Sistema de segurança
+src/monitoring/security_monitor.py
+src/utils/secure_loader.py
+src/utils/secure_logging.py
+src/dashboard/security_dashboard.py
+
+# Scripts de segurança
+scripts/start_security_monitor.py
+
+# Configurações de segurança
+config/security_config.yaml
+config/threat_intelligence.json
+.env.secure.example
+
+# Logs de segurança e auditoria
+security_audit.log
+api_audit.log
+security_monitor.log
+logs/security/
+logs/audit/
+logs/performance.log
+logs/paper_trader.log
+logs/security_monitor_startup.log
+
+# Relatórios de segurança
+SECURITY_IMPLEMENTATION_REPORT.md
+reports/security/
+
+# Dados de checksum de modelos
+model_checksums.json
+
+# Certificados e chaves (NUNCA commitar)
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+ssl/
+certs/
+
+# =============================================================
+# Additional exclusions for clean repository
+# =============================================================
+
+# Reports directory (temporary trading reports)
+reports/
+
+# Roadmap and quality reports
+ENTERPRISE_DATA_QUALITY_REPORT.md
+Q1_2025_ROADMAP_COMPLETE.md
+
+# Hypothesis test data
+.hypothesis/
+
+# Cache configurations
+configs/cache.json
+
+# Production/sensitive scripts
+start_live_trading.sh

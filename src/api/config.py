@@ -1,16 +1,24 @@
 """Configuration settings for the API."""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 import os
 
 
 class Settings(BaseModel):
     """API configuration settings."""
     
+    # Fix Pydantic namespace warning and use v2 config
+    model_config = ConfigDict(
+        protected_namespaces=(),
+        env_file=".env",
+        env_file_encoding="utf-8"
+    )
+    
     # MLflow settings
     mlflow_tracking_uri: str = os.getenv("MLFLOW_TRACKING_URI", "artifacts/mlruns")
     model_name: str = os.getenv("MODEL_NAME", "crypto_xgb")
     model_stage: str = os.getenv("MODEL_STAGE", "Production")
+    model_version: str = os.getenv("MODEL_VERSION", "latest")
     
     # Redis settings
     redis_host: str = os.getenv("REDIS_HOST", "localhost")
@@ -31,9 +39,9 @@ class Settings(BaseModel):
     reload: bool = False
     log_level: str = "info"
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    # WebSocket settings
+    ws_heartbeat_interval: int = 30  # seconds
+    ws_max_connections: int = 100
 
 
 # Global settings instance

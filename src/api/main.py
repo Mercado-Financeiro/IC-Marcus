@@ -10,11 +10,16 @@ from pathlib import Path
 import pickle
 import logging
 
+import os
 from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, validator
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from pydantic import BaseModel, Field, validator, ConfigDict
 import uvicorn
+
+# Import routers
+from src.api.routes import market_data
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -29,14 +34,43 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# CORS middleware
+# Security: Configure allowed origins from environment
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8080").split(",")
+
+# CORS middleware - secure configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=ALLOWED_ORIGINS,  # Specific origins only
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],  # Explicit methods
+    allow_headers=["Authorization", "Content-Type"],  # Explicit headers
 )
+
+# Security: Trusted host middleware
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["localhost", "127.0.0.1", "*.example.com"]
+)
+
+# Security headers middleware
+@app.middleware("http")
+async def security_headers(request, call_next):
+    """Add security headers to all responses."""
+    response = await call_next(request)
+    
+    # Security headers
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    
+    return response
+
+# Include routers
+app.include_router(market_data.router, prefix="/api/v1", tags=["Market Data"])
 
 # Security (basic bearer token)
 security = HTTPBearer()
@@ -49,6 +83,7 @@ models = {}
 
 class PredictionRequest(BaseModel):
     """Request model for predictions."""
+    model_config = ConfigDict(protected_namespaces=())
     
     symbol: str = Field(..., description="Trading symbol (e.g., BTCUSDT)")
     timeframe: str = Field("15m", description="Timeframe for prediction")
@@ -56,9 +91,20 @@ class PredictionRequest(BaseModel):
     
     @validator('symbol')
     def validate_symbol(cls, v):
-        if not v or not v.endswith('USDT'):
+        if not v or not isinstance(v, str):
+            raise ValueError('Symbol must be a non-empty string')
+        
+        # Sanitize: remove potentially dangerous characters
+        import re
+        sanitized = re.sub(r'[^A-Z0-9]', '', v.upper())
+        
+        if not sanitized.endswith('USDT'):
             raise ValueError('Symbol must end with USDT')
-        return v.upper()
+        
+        if len(sanitized) > 20:  # Reasonable length limit
+            raise ValueError('Symbol too long')
+            
+        return sanitized
     
     @validator('timeframe')
     def validate_timeframe(cls, v):
@@ -70,6 +116,7 @@ class PredictionRequest(BaseModel):
 
 class BatchPredictionRequest(BaseModel):
     """Request model for batch predictions."""
+    model_config = ConfigDict(protected_namespaces=())
     
     symbol: str
     timeframe: str = "15m"
@@ -86,6 +133,7 @@ class BatchPredictionRequest(BaseModel):
 
 class PredictionResponse(BaseModel):
     """Response model for predictions."""
+    model_config = ConfigDict(protected_namespaces=())
     
     symbol: str
     timeframe: str
@@ -99,6 +147,7 @@ class PredictionResponse(BaseModel):
 
 class BatchPredictionResponse(BaseModel):
     """Response model for batch predictions."""
+    model_config = ConfigDict(protected_namespaces=())
     
     symbol: str
     timeframe: str
@@ -109,6 +158,7 @@ class BatchPredictionResponse(BaseModel):
 
 class ModelInfo(BaseModel):
     """Model information."""
+    model_config = ConfigDict(protected_namespaces=())
     
     name: str
     version: str
@@ -121,6 +171,7 @@ class ModelInfo(BaseModel):
 
 class HealthResponse(BaseModel):
     """Health check response."""
+    model_config = ConfigDict(protected_namespaces=())
     
     status: str
     timestamp: datetime
@@ -131,27 +182,57 @@ class HealthResponse(BaseModel):
 # ============= Helper Functions =============
 
 def load_model(model_path: str):
-    """Load a trained model from disk."""
+    """Load a trained model from disk with path validation."""
+    import os.path
+    
     try:
-        with open(model_path, 'rb') as f:
+        # Security: Validate and sanitize the model path
+        # Ensure the path is within the allowed models directory
+        base_models_dir = os.path.abspath("artifacts/models")
+        requested_path = os.path.abspath(model_path)
+        
+        # Prevent path traversal attacks
+        if not requested_path.startswith(base_models_dir):
+            logger.error(f"Path traversal attempt detected: {model_path}")
+            raise HTTPException(status_code=400, detail="Invalid model path")
+        
+        # Ensure file exists and has valid extension
+        if not os.path.exists(requested_path):
+            raise HTTPException(status_code=404, detail="Model file not found")
+        
+        if not requested_path.endswith(('.pkl', '.joblib')):
+            raise HTTPException(status_code=400, detail="Invalid model file type")
+        
+        with open(requested_path, 'rb') as f:
             model = pickle.load(f)
-        logger.info(f"Model loaded from {model_path}")
+        
+        logger.info(f"Model loaded from {requested_path}")
         return model
+        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to load model: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to load model")
 
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
-    """Simple token verification (implement properly for production)."""
+    """Secure token verification using environment variables."""
     token = credentials.credentials
-    # --- SECURITY WARNING ---
-    # Hardcoded tokens are a major security risk.
-    # In production, use a secure method like OAuth2 and load secrets
-    # from environment variables or a secret management system.
-    # Example: API_TOKEN = os.getenv("API_TOKEN")
-    if token != "demo-token": # Replace with your actual token logic
+    
+    # Load API token from environment variable
+    expected_token = os.getenv("API_TOKEN")
+    
+    if not expected_token:
+        logger.error("API_TOKEN environment variable not set")
+        raise HTTPException(status_code=500, detail="Server configuration error")
+    
+    # Secure token comparison (constant time)
+    import secrets
+    if not secrets.compare_digest(token, expected_token):
+        logger.warning(f"Invalid token attempt from credentials: {credentials.scheme}")
         raise HTTPException(status_code=403, detail="Invalid token")
+    
     return token
 
 

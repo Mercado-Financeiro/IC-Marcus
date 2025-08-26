@@ -12,7 +12,12 @@ from sklearn.metrics import average_precision_score, matthews_corrcoef, brier_sc
 from sklearn.preprocessing import MinMaxScaler
 
 from src.data.binance_loader import CryptoDataLoader
+from src.data.splits import temporal_train_test_split, PurgedKFold
 from src.features.engineering import FeatureEngineer
+from src.features.filters import FeatureFilter
+from src.features.validation.data_quality import (
+    CryptoDataValidator, FeatureDataValidator, validate_temporal_split
+)
 from src.utils.logging import log as logger
 
 
@@ -20,8 +25,10 @@ from src.utils.logging import log as logger
 class TemporalConfig:
     lookback: int = 96  # ~1 day on 15m
     horizon: int = 5    # bars ahead used for label
-    embargo: int = 96   # will be max(lookback-1, horizon) if not provided
+    embargo: int = 40   # 10 hours for 15m bars (prevents temporal leakage)
     val_frac: float = 0.2
+    validate_data: bool = True  # Enable data quality checks
+    filter_features: bool = True  # Enable aggressive feature filtering
 
 
 def create_labels(close: pd.Series, horizon: int = 5, threshold: float = 0.002) -> pd.Series:
@@ -86,14 +93,22 @@ def ece_score(y_true: np.ndarray, p_pred: np.ndarray, n_bins: int = 15) -> float
 
 
 def embargo_cuts(n: int, test_size: int, cfg: TemporalConfig, n_splits: int = 4) -> List[Tuple[int, int, int, int]]:
-    """Build anchored outer splits with embargo between val and test.
+    """Build anchored outer splits with proper embargo between val and test.
 
     Returns list of tuples (train_start, train_end, val_end, test_end)
     where train is [train_start:train_end), val is [train_end+E:val_end),
     test is [val_end+E:test_end).
+    
+    Key improvement: Uses configured embargo (default 40 bars = 10 hours) 
+    to prevent temporal leakage between splits.
     """
     L, H = cfg.lookback, cfg.horizon
+    # Use configured embargo, ensuring it's at least lookback-1 and horizon
     E = max(cfg.embargo, L - 1, H)
+    
+    # Log embargo information
+    logger.info(f"Using embargo of {E} bars (~{E * 0.25:.1f} hours for 15m data)")
+    
     cuts: List[Tuple[int, int, int, int]] = []
     for j in range(n_splits):
         test_end = n - (n_splits - j - 1) * test_size
@@ -161,11 +176,14 @@ def main():
     ap.add_argument("--timeframe", default="15m")
     ap.add_argument("--start", default="2024-06-01")
     ap.add_argument("--end", default="2024-07-02")
-    ap.add_argument("--lookback", type=int, default=16)  # Reduced from 96
-    ap.add_argument("--horizon", type=int, default=3)   # Reduced from 5
-    ap.add_argument("--label_th", type=float, default=0.001)  # Reduced from 0.002
-    ap.add_argument("--val_frac", type=float, default=0.15)  # Reduced from 0.2
-    ap.add_argument("--test_size", type=int, default=300)  # Reduced from 400
+    ap.add_argument("--lookback", type=int, default=96)  # ~1 day on 15m
+    ap.add_argument("--horizon", type=int, default=5)   # 5 bars ahead
+    ap.add_argument("--embargo", type=int, default=40)  # 10 hours embargo
+    ap.add_argument("--label_th", type=float, default=0.002)
+    ap.add_argument("--val_frac", type=float, default=0.2)
+    ap.add_argument("--test_size", type=int, default=400)
+    ap.add_argument("--validate", action="store_true", help="Enable data validation")
+    ap.add_argument("--filter_features", action="store_true", help="Enable aggressive feature filtering")
     ap.add_argument("--fee_bps", type=float, default=8.0)
     ap.add_argument("--slippage_bps", type=float, default=4.0)
     args = ap.parse_args()
@@ -183,7 +201,23 @@ def main():
     y_all = y_all.loc[mask]
 
     n = len(df)
-    cfg = TemporalConfig(lookback=args.lookback, horizon=args.horizon, embargo=max(args.lookback - 1, args.horizon), val_frac=args.val_frac)
+    # Validate OHLCV data if requested
+    if args.validate:
+        validator = CryptoDataValidator(symbol=args.symbol, timeframe=args.timeframe)
+        report = validator.validate(df)
+        if not report.passed:
+            logger.error(f"Data validation failed: {report.errors}")
+            return
+        logger.info(f"Data validation passed with {report.pass_rate:.1f}% checks")
+    
+    cfg = TemporalConfig(
+        lookback=args.lookback, 
+        horizon=args.horizon, 
+        embargo=args.embargo,  # Use explicit embargo parameter
+        val_frac=args.val_frac,
+        validate_data=args.validate,
+        filter_features=args.filter_features
+    )
     cuts = embargo_cuts(n, args.test_size, cfg, n_splits=4)
     if not cuts:
         print("no_cuts_generated; reduce test_size or adjust dates")
