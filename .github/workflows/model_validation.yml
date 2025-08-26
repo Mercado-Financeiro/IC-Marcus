@@ -2,7 +2,7 @@ name: Model Validation and Performance Gates
 
 on:
   push:
-    branches: [main, develop, feature/*]
+    branches: [main, develop, 'feature/*', 'test/**']
   pull_request:
     branches: [main, develop]
 
