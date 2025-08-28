@@ -49,6 +49,19 @@ tmp/
 .DS_Store
 Thumbs.db
 
+# Notebooks temporários e outputs
+notebooks/
+.hypothesis/
+
+# Aplicações externas
+kucoin-trading-app/
+
+# Scripts temporários
+C:ProjetosProjeto_ICrun_profit_pipeline.sh
+
+# Cache e arquivos temporários do sistema
+.streamlit/
+
 # IDEs/editores
 .vscode/
 .idea/
