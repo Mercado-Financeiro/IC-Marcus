@@ -37,14 +37,14 @@ When this PR is created, the following should happen:
    - Performance metrics if applicable
    - Any issues or warnings
 
-## How to Interact with Claude
+## Automated PR Features
 
-Once the PR is created, you can use these commands in PR comments:
+Once the PR is created, the following automated features will be active:
 
-- `@claude review this PR` - Get AI code review
-- `@claude explain the changes` - Get explanation of changes
-- `@claude suggest improvements` - Get improvement suggestions
-- `@claude check security` - Security analysis
+- Automated test execution and reporting
+- Code quality analysis
+- Performance metrics collection
+- Security vulnerability scanning
 
 ## Success Criteria
 
@@ -52,7 +52,7 @@ Once the PR is created, you can use these commands in PR comments:
 ✅ Smoke backtest completes successfully
 ✅ PR receives automated comments with results
 ✅ No security vulnerabilities detected
-✅ Claude integration responds to commands
+✅ Automated workflows execute correctly
 
 ## Monitoring
 

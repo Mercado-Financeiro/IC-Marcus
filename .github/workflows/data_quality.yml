@@ -7,7 +7,6 @@ on:
       - 'src/data/**'
       - 'src/features/**'
       - 'src/monitoring/**'
-      - 'src/remediation/**'
       - 'tests/**'
       - 'configs/**'
   pull_request:
