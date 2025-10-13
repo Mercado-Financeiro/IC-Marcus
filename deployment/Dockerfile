@@ -1,5 +1,5 @@
 # Multi-stage build for ML Trading Pipeline
-FROM python:3.11-slim AS base
+FROM python:3.14-slim AS base
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
