@@ -1,6 +1,6 @@
 mlflow==3.3.1
 mlflow-skinny==3.3.1
-mlflow-tracing==3.3.1
+mlflow-tracing==3.5.0
 mypy_extensions==1.1.0
 numpy==1.26.4
 optuna==4.4.0
